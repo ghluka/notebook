@@ -1,0 +1,2161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>notebook</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#262624;          /* page */
+    --panel:#1f1e1d;       /* rails */
+    --raised:#30302e;      /* bubbles, inputs */
+    --hover:#333331;
+    --line:#3a3937;
+    --fg:#faf9f5;
+    --dim:#b8b5ad;
+    --faint:#82807a;
+    --accent:#d97757;      /* clay */
+    --blue:#7aa2c7;
+    --bad:#e07a6a;
+    --ok:#8fae7a;
+    --sans:ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --serif:"Iowan Old Style", "Palatino Linotype", Palatino, Georgia, ui-serif, serif;
+    --mono:ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; height:100vh; overflow:hidden;
+    display:grid; grid-template-columns:264px minmax(0, 1fr);
+    background:var(--bg); color:var(--fg); font:14px/1.55 var(--sans);
+  }
+  /* The viewer takes a share of the window rather than a fixed slab, so the
+     conversation never gets squeezed into a column on a small screen. */
+  body.with-viewer { grid-template-columns:264px minmax(0, 1fr) clamp(300px, 34vw, 460px); }
+  button { font:inherit; cursor:pointer; color:inherit; }
+  ::-webkit-scrollbar { width:10px; height:10px; }
+  ::-webkit-scrollbar-thumb { background:#413f3c; border-radius:6px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+
+  /* ------------------------------------------------------- explorer */
+  aside { background:var(--panel); border-right:1px solid var(--line);
+          display:flex; flex-direction:column; min-width:0; }
+
+  .icon-btn { background:transparent; border:0; padding:4px; border-radius:6px;
+              color:var(--dim); display:flex; }
+  .icon-btn:hover { background:var(--hover); color:var(--fg); }
+  .tree { flex:1; min-height:0; overflow:auto; padding:2px 0 8px; user-select:none; }
+  /* Two stacked sections in the rail. `flex:1 1 0` on both makes the split even
+     regardless of how many rows each holds, and each list scrolls on its own. */
+  .rail-section { flex:1 1 0; min-height:0; display:flex; flex-direction:column;
+                  border-bottom:1px solid var(--line); }
+  .rail-section:last-of-type { border-bottom:0; }
+  .section-head { display:flex; align-items:center; gap:2px; padding:9px 6px 5px 10px;
+                  font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+                  color:var(--faint); }
+  .section-head b { font-weight:600; flex:1; font-size:11px; letter-spacing:.08em; }
+  .section-head .icon-btn { padding:3px; }
+  .chat-list { flex:1; min-height:0; overflow:auto; padding-bottom:8px; }
+  .chat-row { display:flex; align-items:center; gap:8px; padding:5px 10px;
+              font-size:13px; color:var(--dim); cursor:default; }
+  .chat-row:hover { background:var(--hover); }
+  .chat-row.on { background:#3b3a37; color:var(--fg); }
+  .chat-row .ct { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chat-row .when { font-size:11px; color:var(--faint); flex:none; }
+  .chat-row .dot { color:var(--accent); font-size:10px; }
+  .chat-row .kill { display:none; background:transparent; border:0; color:var(--faint);
+                    font-size:14px; line-height:1; padding:2px 4px; border-radius:5px;
+                    flex:none; }
+  .chat-row:hover .kill { display:block; }
+  .chat-row .kill:hover { background:#4a3330; color:var(--bad); }
+  .chat-empty { color:var(--faint); font-size:12px; padding:4px 10px 10px; }
+  .tree.drop-root { background:rgba(217,119,87,.06); }
+
+  .node { display:flex; align-items:center; gap:6px; height:24px; padding:0 8px 0 0;
+          font-size:13px; color:var(--dim); white-space:nowrap; cursor:default; }
+  .node:hover { background:var(--hover); }
+  .node.sel { background:#3b3a37; color:var(--fg); }
+  .node.scoped { color:var(--fg); }
+  .node.scoped .name::after { content:"·"; color:var(--accent); margin-left:6px;
+                              font-weight:700; }
+  .node.drop { outline:1px solid var(--accent); outline-offset:-1px; }
+  .node .twist { width:14px; flex:none; display:flex; justify-content:center;
+                 color:var(--faint); }
+  .node .ico { width:16px; height:16px; flex:none; }
+  .node .name { overflow:hidden; text-overflow:ellipsis; }
+  .node .state { margin-left:auto; font-size:11px; color:var(--faint); flex:none; }
+  .node .state.failed { color:var(--bad); }
+  .node .state.busy { color:var(--accent); }
+  .node input { background:var(--bg); border:1px solid var(--accent); color:var(--fg);
+                font:inherit; border-radius:4px; padding:0 4px; width:100%; outline:none; }
+  /* Fixed height, because the scope button is taller than the line of text and
+     the bar would otherwise grow the moment a file goes into scope. */
+  .rail-foot { height:40px; flex:none; padding:0 10px;
+               border-top:1px solid var(--line);
+               font-size:12px; color:var(--faint); display:flex; gap:8px;
+               align-items:center; }
+  .rail-foot button { background:transparent; border:1px solid var(--line);
+                      border-radius:6px; padding:3px 8px; font-size:12px;
+                      line-height:1.35; color:var(--dim); }
+  .rail-foot button:hover { color:var(--fg); border-color:#4d4b47; }
+
+  /* ------------------------------------------------------------ chat */
+  /* min-height:0 on both, or the grid item and the flex child size themselves
+     to their content and push the composer off the bottom instead of scrolling. */
+  main { display:flex; flex-direction:column; min-width:0; min-height:0; }
+  #log { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:28px 0 8px; }
+  .thread { width:min(760px, 100%); margin:0 auto; padding:0 24px; }
+  .turn { margin-bottom:26px; }
+  .turn.user { display:flex; justify-content:flex-end; }
+  .turn.user .bubble { background:var(--raised); border-radius:14px; padding:9px 15px;
+                       max-width:78%; white-space:pre-wrap; }
+  .turn.assistant .body { font:16px/1.7 var(--serif); color:var(--fg); }
+  .turn.assistant .body p { margin:0 0 14px; }
+  .turn.assistant .body h1, .turn.assistant .body h2, .turn.assistant .body h3 {
+      font:600 17px/1.4 var(--sans); margin:22px 0 10px; }
+  .turn.assistant .body ul, .turn.assistant .body ol { margin:0 0 14px; padding-left:22px; }
+  .turn.assistant .body li { margin:4px 0; }
+  .turn.assistant .body code { font:13px var(--mono); background:#31302d;
+                               padding:1px 5px; border-radius:5px; }
+  .turn.assistant .body pre { background:#1c1b1a; border:1px solid var(--line);
+                              border-radius:10px; padding:12px 14px; overflow:auto;
+                              margin:0 0 14px; }
+  .turn.assistant .body pre code { background:none; padding:0; font-size:12.5px; }
+  .turn.assistant .body blockquote { margin:0 0 14px; padding-left:14px;
+                                     border-left:2px solid var(--line); color:var(--dim); }
+  /* Rendered formulas. MathML inherits the surrounding serif, which is what we
+     want; it just needs a touch more size and room to breathe. */
+  .turn.assistant .body math { font-size:1.06em; }
+  /* overflow-x on its own promotes overflow-y to auto, which puts a scrollbar
+     beside formulas that have nothing to scroll. Pin the vertical axis. */
+  .math-block { margin:0 0 16px; padding:4px 0; text-align:center;
+                overflow-x:auto; overflow-y:hidden; }
+  .math-block math { font-size:1.16em; }
+  /* Fallback for anything the converter does not cover: the source, legibly. */
+  .math-src { font:13.5px var(--mono); color:#e8c9a0; }
+  pre.math-src { background:#1c1b1a; border:1px solid var(--line); border-radius:10px;
+                 padding:10px 14px; margin:0 0 14px;
+                 overflow-x:auto; overflow-y:hidden; }
+  .turn.assistant .body a { color:var(--accent); }
+  .meta-line { display:flex; gap:10px; align-items:center; margin-top:10px;
+               font-size:12px; color:var(--faint); flex-wrap:wrap; }
+  .cite { border:1px solid var(--line); border-radius:999px; padding:2px 9px;
+          background:transparent; color:var(--dim); font-size:12px; }
+  .cite:hover { border-color:var(--accent); color:var(--fg); }
+  .turn.note { color:var(--faint); font-size:13px; }
+  .turn.note.bad { color:var(--bad); }
+  .thinking { color:var(--faint); font-size:13px; }
+  .empty-chat { color:var(--faint); text-align:center; margin-top:22vh; font-size:14px; }
+
+  /* -------------------------------------------------------- composer */
+  .composer-wrap { padding:0 24px 22px; position:relative;
+                   width:min(808px, 100%); margin:0 auto; }
+  .composer { background:var(--panel); border:1px solid var(--line);
+              border-radius:16px; padding:12px 14px 9px; }
+  .composer:focus-within { border-color:#4d4b47; }
+  textarea { width:100%; background:transparent; border:0; resize:none; color:var(--fg);
+             font:15px/1.5 var(--sans); outline:none; max-height:190px; min-height:24px; }
+  textarea::placeholder { color:var(--faint); }
+  .bar { display:flex; align-items:center; justify-content:space-between; gap:8px;
+         margin-top:8px; }
+  .bar .right { display:flex; align-items:center; gap:4px; }
+  .chip { background:transparent; border:0; color:var(--faint); padding:5px 9px;
+          border-radius:8px; display:flex; align-items:center; gap:6px; font-size:13px; }
+  .chip:hover { background:var(--hover); color:var(--fg); }
+  .chip.strong { color:var(--dim); }
+  .send { background:var(--accent); color:#241a15; border:0; border-radius:9px;
+          width:32px; height:30px; font-weight:700; display:flex;
+          align-items:center; justify-content:center; }
+  .send:disabled { opacity:.35; cursor:not-allowed; }
+  /* Running: the same control becomes stop, the way Esc does. */
+  .send.stop { background:transparent; border:1px solid var(--line); color:var(--fg); }
+  .send.stop:hover { border-color:var(--accent); }
+  .send .sq { width:9px; height:9px; background:currentColor; border-radius:2px; }
+
+  .queue { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
+  .queue[hidden] { display:none; }
+  .qhead { font-size:11px; color:var(--faint); letter-spacing:.07em;
+           text-transform:uppercase; padding-left:4px; }
+  .qchip { display:flex; align-items:center; gap:6px; background:var(--panel);
+           border:1px solid var(--line); border-radius:10px;
+           padding:6px 6px 6px 12px; font-size:13px; color:var(--dim); }
+  .qchip .qtext { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .qchip button { background:transparent; border:0; color:var(--faint); font-size:12px;
+                  padding:3px 7px; border-radius:6px; }
+  .qchip button:hover { background:var(--hover); color:var(--fg); }
+  .qchip button.steer:hover { color:var(--accent); }
+
+  /* Slash command menu, anchored above the composer. */
+  .cmds { position:absolute; left:24px; bottom:calc(100% + 6px); z-index:25;
+          background:#2c2b29; border:1px solid var(--line); border-radius:10px;
+          padding:5px; min-width:280px; box-shadow:0 16px 40px rgba(0,0,0,.55); }
+  .cmds[hidden] { display:none; }
+  .cmd { display:flex; align-items:baseline; gap:10px; width:100%;
+         background:transparent; border:0; color:var(--fg); padding:7px 10px;
+         border-radius:7px; text-align:left; font-size:13px; }
+  .cmd.on, .cmd:hover { background:var(--hover); }
+  .cmd .cname { font-family:var(--mono); font-size:12.5px; }
+  .cmd .chint { color:var(--faint); font-size:12px; }
+
+  .divider { display:flex; align-items:center; gap:10px; color:var(--faint);
+             font-size:12px; margin:22px 0; }
+  .divider::before, .divider::after { content:""; height:1px; background:var(--line);
+                                      flex:1; }
+  .ring { width:28px; height:28px; padding:0; justify-content:center; }
+  .ring circle { fill:none; stroke-width:3; }
+  .ring .track { stroke:#413f3c; }
+  .ring .fill { stroke:var(--accent); stroke-linecap:round;
+                transform:rotate(-90deg); transform-origin:50% 50%; }
+
+  /* --------------------------------------------------------- viewer */
+  .viewer { background:var(--panel); border-left:1px solid var(--line);
+            display:flex; flex-direction:column; min-width:0; }
+  /* A class with `display` outranks the browser's [hidden] rule, so say it here
+     or the pane keeps its grid slot and wraps under the explorer. */
+  .viewer[hidden] { display:none; }
+  .viewer header { display:flex; align-items:center; gap:8px; padding:10px 12px;
+                   border-bottom:1px solid var(--line); }
+  .viewer header b { font-size:13px; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap; flex:1; }
+  .viewer .tabs { display:flex; gap:2px; padding:8px 10px 0; }
+  .viewer .tabs button { background:transparent; border:0; color:var(--faint);
+                         font-size:12px; padding:5px 9px; border-radius:7px; }
+  .viewer .tabs button.on { background:var(--raised); color:var(--fg); }
+  .viewer .body { flex:1; overflow:auto; padding:12px 14px; }
+  .viewer .body pre { white-space:pre-wrap; word-break:break-word;
+                      font:13px/1.65 var(--mono); color:var(--dim); margin:0; }
+  .viewer .body img { max-width:100%; border-radius:8px; }
+  .viewer .body iframe { width:100%; height:100%; border:0; border-radius:8px;
+                         background:#fff; }
+  .viewer .facts { font-size:12px; color:var(--faint); line-height:1.9; }
+  .viewer .facts b { color:var(--dim); font-weight:500; }
+
+  @media (max-width: 980px) {
+    body.with-viewer { grid-template-columns:264px minmax(0, 1fr); }
+    body.with-viewer .viewer { position:fixed; top:0; right:0; bottom:0;
+      width:min(440px, 82vw); z-index:30;
+      box-shadow:-18px 0 40px rgba(0,0,0,.45); }
+  }
+
+  /* -------------------------------------------------------- menus */
+  .ctx { position:fixed; z-index:80; background:#2c2b29; border:1px solid var(--line);
+         border-radius:10px; padding:5px; min-width:190px;
+         box-shadow:0 16px 40px rgba(0,0,0,.55); }
+  .ctx[hidden], .pop[hidden], .menu[hidden] { display:none; }
+  .ctx button, .row { display:flex; align-items:center; justify-content:space-between;
+         gap:14px; width:100%; background:transparent; border:0; color:var(--fg);
+         padding:7px 10px; border-radius:7px; text-align:left; font-size:13px; }
+  .ctx button:hover, button.row:hover { background:var(--hover); }
+  .ctx button.danger { color:var(--bad); }
+  .ctx .key { color:var(--faint); font-size:12px; }
+  .sep { height:1px; background:var(--line); margin:5px 3px; }
+
+  .pop { position:absolute; bottom:76px; right:24px; z-index:20; background:#2c2b29;
+         border:1px solid var(--line); border-radius:12px; min-width:290px;
+         max-height:60vh; overflow:auto; padding:6px;
+         box-shadow:0 16px 40px rgba(0,0,0,.55); }
+  .pop h3 { font-size:12px; color:var(--faint); margin:6px 10px; font-weight:600; }
+  .row .sub { color:var(--faint); font-size:12px; white-space:nowrap; }
+  .row .tick { color:var(--accent); }
+  .barmeter { height:6px; border-radius:4px; background:#413f3c; overflow:hidden;
+              margin:6px 10px 10px; }
+  .barmeter i { display:block; height:100%; background:var(--accent); }
+
+  /* --------------------------------------------------------- dialog */
+  #dialog { z-index:90; }
+  .dialog { width:min(420px, 100%); }
+  .dialog .head { padding:14px 16px 0; font-weight:600; font-size:14px; }
+  .dialog .msg { padding:8px 16px 0; color:var(--dim); font-size:13px;
+                 line-height:1.5; white-space:pre-wrap; }
+  .dialog .field { padding:14px 16px 0; margin:0; }
+  .dialog .field input, .dialog .field select { width:100%; }
+  .dialog .actions { display:flex; justify-content:flex-end; gap:8px;
+                     padding:16px; }
+  .dialog .actions .btn.danger { border-color:#5c3a35; }
+  .dialog .actions .btn.danger:hover { background:#3a2724; }
+
+  /* -------------------------------------------------------- modals */
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.62); z-index:60;
+           display:flex; align-items:center; justify-content:center; padding:34px; }
+  .modal[hidden] { display:none; }
+  .sheet { background:var(--panel); border:1px solid var(--line); border-radius:14px;
+           width:min(1120px,100%); max-height:100%; display:flex; flex-direction:column; }
+  .sheet header { display:flex; align-items:center; gap:10px; padding:12px 16px;
+                  border-bottom:1px solid var(--line); }
+  .spacer { flex:1; }
+  .toolbar { display:flex; gap:8px; padding:12px 16px; align-items:center; }
+  input[type=text], input[type=password], select {
+      background:var(--bg); color:var(--fg); border:1px solid var(--line);
+      border-radius:8px; padding:8px 10px; font:inherit; outline:none; }
+  input[type=text]:focus, input[type=password]:focus { border-color:var(--accent); }
+  label.check { display:flex; align-items:center; gap:6px; color:var(--dim);
+                font-size:13px; white-space:nowrap; }
+  .grow { flex:1; }
+  .btn { background:var(--accent); color:#241a15; border:0; border-radius:8px;
+         padding:8px 12px; font-weight:600; font-size:13px; }
+  .btn.ghost { background:transparent; color:var(--fg); border:1px solid var(--line);
+               font-weight:500; }
+  .btn.danger { background:transparent; color:var(--bad); border:1px solid var(--line);
+                font-weight:500; }
+  .btn.sm { padding:4px 8px; font-size:12px; }
+  .scroll { overflow:auto; padding:0 16px 16px; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:12px; color:var(--faint); font-weight:600;
+       padding:8px 10px; border-bottom:1px solid var(--line); position:sticky; top:0;
+       background:var(--panel); z-index:1; }
+  td { padding:8px 10px; border-bottom:1px solid #2e2d2b; vertical-align:middle;
+       font-size:13px; }
+  tr.hidden-model td { opacity:.45; }
+  td.num { font-variant-numeric:tabular-nums; color:var(--dim); }
+  td.actions { text-align:right; white-space:nowrap; }
+  td.actions .btn { margin-left:5px; }
+  .tag { display:inline-block; font-size:11px; color:var(--faint);
+         border:1px solid var(--line); border-radius:999px; padding:1px 8px;
+         margin-right:4px; cursor:pointer; background:transparent; }
+  .tag.on { color:var(--fg); border-color:#5b5854; background:#343330; }
+  .tag:hover { border-color:var(--accent); }
+  .badge { font-size:11px; color:var(--dim); border:1px solid var(--line);
+           border-radius:999px; padding:2px 8px; }
+  .empty { color:var(--faint); padding:26px 10px; text-align:center; font-size:13px; }
+  .menu { position:absolute; background:#2c2b29; border:1px solid var(--line);
+          border-radius:10px; padding:5px; min-width:200px; z-index:70;
+          box-shadow:0 16px 40px rgba(0,0,0,.55); }
+  .field { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
+  .field label { font-size:12px; color:var(--faint); }
+  .hint { color:var(--faint); font-size:12px; }
+  .hint.bad { color:var(--bad); }
+  h2.section { font-size:11px; text-transform:uppercase; color:var(--faint);
+               letter-spacing:.09em; margin:24px 0 8px; }
+</style>
+</head>
+<body>
+
+<aside>
+  <div class="rail-section">
+    <div class="section-head">
+      <b>Chats</b>
+      <button class="icon-btn" id="newChatBtn" title="New conversation">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M8 3.4v9.2M3.4 8h9.2"/>
+        </svg>
+      </button>
+    </div>
+    <div class="chat-list" id="chatList"></div>
+  </div>
+
+  <div class="rail-section">
+    <div class="section-head">
+      <b>Sources</b>
+      <button class="icon-btn" id="newFileBtn" title="Upload files">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M9 1.6H4.2a1 1 0 0 0-1 1v10.8a1 1 0 0 0 1 1h7.6a1 1 0 0 0 1-1V5.4z"/>
+          <path d="M9 1.6v3.8h3.8M8 8v4M6 10h4"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="newFolderBtn" title="New folder">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M1.8 12.6V3.9a.8.8 0 0 1 .8-.8h3.1l1.4 1.7h6.1a.8.8 0 0 1 .8.8v7a.8.8 0 0 1-.8.8H2.6a.8.8 0 0 1-.8-.8z"/>
+          <path d="M8 7.4v3.4M6.3 9.1h3.4"/>
+        </svg>
+      </button>
+      <button class="icon-btn" id="refreshTree" title="Refresh">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">
+          <path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8"/><path d="M13.6 2.4v3.4h-3.4"/>
+        </svg>
+      </button>
+    </div>
+    <div class="tree" id="tree"></div>
+  </div>
+  <div class="rail-foot">
+    <span id="treeStatus">0 files</span>
+    <span class="spacer" style="flex:1"></span>
+    <button id="clearScope">Clear scope</button>
+  </div>
+  <input id="file" type="file" multiple hidden>
+</aside>
+
+<main>
+  <div id="log"><div class="thread" id="thread"></div></div>
+  <div class="composer-wrap">
+    <div class="queue" id="queue" hidden></div>
+    <div class="cmds" id="cmds" hidden></div>
+    <div class="composer">
+      <textarea id="q" rows="1" placeholder="Ask about your sources"></textarea>
+      <div class="bar">
+        <div class="left">
+          <button class="chip" id="searchBtn" title="Search the index without calling a model">Search index</button>
+        </div>
+        <div class="right">
+          <button class="chip strong" id="modelBtn">Select model</button>
+          <button class="chip" id="effortBtn">Off</button>
+          <button class="chip ring" id="ctxBtn" title="Context window">
+            <svg width="28" height="28" viewBox="0 0 28 28">
+              <circle class="track" cx="14" cy="14" r="9.5"></circle>
+              <circle class="fill" id="ctxRing" cx="14" cy="14" r="9.5"
+                      stroke-dasharray="59.7" stroke-dashoffset="59.7"></circle>
+            </svg>
+          </button>
+          <button class="send" id="send" title="Send (Enter)">&#8629;</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pop" id="modelPop" hidden></div>
+    <div class="pop" id="effortPop" hidden>
+      <h3>Thinking effort</h3><div id="effortList"></div>
+    </div>
+    <div class="pop" id="ctxPop" hidden>
+      <div class="row"><span>Context window</span><span class="sub" id="ctxText">no data</span></div>
+      <div class="barmeter"><i id="ctxBar" style="width:0%"></i></div>
+      <div class="hint" style="padding:0 10px 8px" id="ctxNote">No turn yet.</div>
+    </div>
+  </div>
+</main>
+
+<div class="viewer" id="viewer" hidden>
+  <header>
+    <b id="viewerTitle">Viewer</b>
+    <button class="icon-btn" id="viewerClose" title="Close">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>
+      </svg>
+    </button>
+  </header>
+  <div class="tabs" id="viewerTabs"></div>
+  <div class="body" id="viewerBody"></div>
+</div>
+
+<div class="ctx" id="ctx" hidden></div>
+
+<div class="modal" id="dialog" hidden>
+  <div class="sheet dialog">
+    <div class="head" id="dialogTitle"></div>
+    <div class="msg" id="dialogMessage"></div>
+    <div class="field" id="dialogField" hidden></div>
+    <div class="actions" id="dialogActions"></div>
+  </div>
+</div>
+
+<!-- ----------------------------------------------------- configure ---- -->
+<div class="modal" id="configure" hidden>
+  <div class="sheet">
+    <header>
+      <b>Language Models</b>
+      <span class="badge" id="userBadge">local</span>
+      <span class="spacer"></span>
+      <div style="position:relative">
+        <button class="btn" id="addProviderBtn">Add provider</button>
+        <div class="menu" id="presetMenu" hidden style="right:0; top:40px"></div>
+      </div>
+      <button class="btn ghost" id="closeConfig">Close</button>
+    </header>
+    <div class="toolbar">
+      <input type="text" id="modelSearch" class="grow" placeholder="Type to search">
+      <select id="providerFilter"><option value="">All providers</option></select>
+      <label class="check"><input type="checkbox" id="showHidden"> Show hidden <span id="hiddenCount"></span></label>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:30%">Name</th><th>Provider</th><th>Context size</th>
+            <th>Capabilities</th><th>Role</th><th style="width:210px"></th>
+          </tr>
+        </thead>
+        <tbody id="modelRows"></tbody>
+      </table>
+      <div id="modelEmpty" class="empty" hidden>
+        No models yet. <b>Add provider</b> stores your API key for that endpoint and
+        imports every model it reports, then you hide the ones you do not want and
+        pin the ones you do.
+      </div>
+      <div class="hint" style="margin-top:10px">
+        Capability tags are clickable. Endpoints that report their own metadata
+        (LM Studio, OpenRouter) set these on import; bare listings are guessed
+        from the model id, so fix any that are wrong here.
+      </div>
+
+      <h2 class="section">Your providers</h2>
+      <table>
+        <thead>
+          <tr>
+            <th style="width:22%">Name</th><th>Endpoint</th><th>API style</th>
+            <th>Key</th><th>Models</th><th style="width:270px"></th>
+          </tr>
+        </thead>
+        <tbody id="providerRows"></tbody>
+      </table>
+      <div id="providerEmpty" class="empty" hidden>Nothing connected yet.</div>
+      <div class="hint" style="margin-top:12px">
+        Keys are stored server side against your user and never sent back to the
+        browser; only the last four characters are shown.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ------------------------------------------------ provider form ----- -->
+<div class="modal" id="providerForm" hidden>
+  <div class="sheet" style="width:min(520px,100%)">
+    <header><b id="pfTitle">Add provider</b><span class="spacer"></span>
+      <button class="btn ghost" id="pfCancel">Cancel</button></header>
+    <div style="padding:16px">
+      <div class="field"><label for="pfName">Name</label><input type="text" id="pfName"></div>
+      <div class="field"><label for="pfStyle">API style</label>
+        <select id="pfStyle">
+          <option value="anthropic">Anthropic, /v1/messages</option>
+          <option value="openai">OpenAI compatible, /chat/completions</option>
+        </select>
+      </div>
+      <div class="field"><label for="pfUrl">Base URL</label>
+        <input type="text" id="pfUrl" placeholder="https://api.example.com/v1"></div>
+      <div class="field"><label for="pfKey">API key</label>
+        <input type="password" id="pfKey" placeholder="stored server side, never returned"></div>
+      <div class="hint" id="pfHint">Saving reads the endpoint's model list and imports it.</div>
+      <div style="display:flex; gap:8px; margin-top:16px; justify-content:flex-end">
+        <button class="btn" id="pfSave">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = {
+  sources: [], folders: [], open: new Set(), scope: new Set(),
+  selectedNode: null, conversationId: null, viewerSource: null, viewerTab: 'rendition',
+  settings: { pinned: [], researcher: null, thinking_effort: 'off' },
+  activeModel: null, context: { used: 0, window: 0 },
+  models: [], providers: [], roles: {}, editingProvider: null, dropTarget: null,
+  chats: [], cmdIndex: 0,
+};
+
+async function api(path, opts = {}) {
+  if (opts.json !== undefined) {
+    opts.body = JSON.stringify(opts.json);
+    opts.headers = { 'content-type': 'application/json' };
+    delete opts.json;
+  }
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({ error: r.statusText }));
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+
+const fmt = n => !n ? 'unknown'
+  : n >= 1e6 ? (n / 1e6).toFixed(n % 1e6 ? 1 : 0) + 'M'
+  : n >= 1e3 ? (n / 1e3).toFixed(n % 1e3 ? 1 : 0) + 'k' : String(n);
+const bytes = n => n >= 1e6 ? (n / 1048576).toFixed(1) + ' MB'
+                 : n >= 1e3 ? (n / 1024).toFixed(0) + ' KB' : n + ' B';
+const esc = s => s.replace(/[&<>"']/g, c =>
+  ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+
+/* ------------------------------------------------------------- icons */
+const ICON = {
+  folder: '<path d="M1.8 12.6V3.9a.8.8 0 0 1 .8-.8h3.1l1.4 1.7h6.1a.8.8 0 0 1 .8.8v7a.8.8 0 0 1-.8.8H2.6a.8.8 0 0 1-.8-.8z"/>',
+  file:   '<path d="M9 1.6H4.2a1 1 0 0 0-1 1v10.8a1 1 0 0 0 1 1h7.6a1 1 0 0 0 1-1V5.4z"/><path d="M9 1.6v3.8h3.8"/>',
+  image:  '<rect x="2.2" y="3.2" width="11.6" height="9.6" rx="1"/><circle cx="5.6" cy="6.4" r="1"/><path d="M2.6 11.4l3.2-3 2.4 2.2 2.2-1.9 3 2.7"/>',
+  video:  '<rect x="2" y="3.6" width="8.8" height="8.8" rx="1"/><path d="M10.8 7.6L14 5.6v6.8l-3.2-2z"/>',
+  audio:  '<path d="M4 9.6V6.4M6.6 11.6V4.4M9.2 10.4V5.6M11.8 9V7"/>',
+  code:   '<path d="M5.6 5.4L2.6 8l3 2.6M10.4 5.4L13.4 8l-3 2.6M8.8 4l-1.6 8"/>',
+};
+const KIND_COLOR = { pdf:'#e07a6a', image:'#8fae7a', video:'#c9a0e0', audio:'#e0c07a',
+                     text:'#7aa2c7', url:'#b8b5ad', folder:'#c8a06a' };
+
+function iconSvg(kind, filename) {
+  let shape = ICON.file, color = KIND_COLOR[kind] || 'var(--faint)';
+  if (kind === 'folder') shape = ICON.folder;
+  else if (kind === 'image') shape = ICON.image;
+  else if (kind === 'video') shape = ICON.video;
+  else if (kind === 'audio') shape = ICON.audio;
+  else if (kind === 'text' && /\.(rs|py|js|ts|go|c|h|cpp|java|json|toml|ya?ml)$/i.test(filename || ''))
+    { shape = ICON.code; color = '#a8b57a'; }
+  const label = kind === 'pdf' ? '<text x="8" y="12.4" font-size="4.6" fill="' + color +
+      '" stroke="none" font-family="sans-serif" font-weight="700">PDF</text>' : '';
+  return '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="' + color +
+         '" stroke-width="1.3" stroke-linejoin="round">' + shape + label + '</svg>';
+}
+
+/* ---------------------------------------------------------- explorer */
+async function loadTree() {
+  const data = await api('/api/sources');
+  state.sources = data.sources;
+  state.folders = data.folders;
+  renderTree();
+}
+
+function renderTree() {
+  const tree = $('#tree');
+  tree.innerHTML = '';
+  drawLevel(null, 0, tree);
+
+  const scoped = state.scope.size;
+  $('#treeStatus').textContent = `${state.sources.length} file${state.sources.length === 1 ? '' : 's'}` +
+    (scoped ? `, ${scoped} in scope` : '');
+  $('#clearScope').hidden = !scoped;
+}
+
+function drawLevel(parentId, depth, into) {
+  for (const f of state.folders.filter(f => (f.parent_id || null) === parentId)) {
+    const open = state.open.has(f.id);
+    into.append(folderNode(f, depth, open));
+    if (open) drawLevel(f.id, depth + 1, into);
+  }
+  for (const s of state.sources.filter(s => (s.folder_id || null) === parentId)) {
+    into.append(sourceNode(s, depth));
+  }
+}
+
+function baseNode(depth) {
+  const el = document.createElement('div');
+  el.className = 'node';
+  el.style.paddingLeft = (6 + depth * 12) + 'px';
+  return el;
+}
+
+function folderNode(folder, depth, open) {
+  const el = baseNode(depth);
+  el.dataset.folderId = folder.id;
+  el.innerHTML =
+    `<span class="twist">${open ? '&#9662;' : '&#9656;'}</span>` +
+    iconSvg('folder') +
+    `<span class="name">${esc(folder.name)}</span>`;
+  if (state.selectedNode === 'f:' + folder.id) el.classList.add('sel');
+
+  el.onclick = () => {
+    state.open.has(folder.id) ? state.open.delete(folder.id) : state.open.add(folder.id);
+    state.selectedNode = 'f:' + folder.id;
+    renderTree();
+  };
+  el.oncontextmenu = e => { e.preventDefault(); folderMenu(e, folder); };
+
+  el.ondragover = e => { e.preventDefault(); el.classList.add('drop'); state.dropTarget = folder.id; };
+  el.ondragleave = () => { el.classList.remove('drop'); };
+  el.ondrop = e => { e.preventDefault(); el.classList.remove('drop'); drop(folder.id); };
+  return el;
+}
+
+function sourceNode(source, depth) {
+  const el = baseNode(depth);
+  el.dataset.sourceId = source.id;
+  el.draggable = true;
+  const stateClass = source.status === 'failed' ? 'failed'
+                   : source.status === 'ready' ? '' : 'busy';
+  el.innerHTML =
+    '<span class="twist"></span>' +
+    iconSvg(source.kind, source.original_filename) +
+    `<span class="name">${esc(source.title)}</span>` +
+    (source.status === 'ready' ? '' :
+      `<span class="state ${stateClass}">${source.status}</span>`);
+  el.title = source.error || `${source.kind}, ${bytes(source.byte_size)}`;
+  if (state.scope.has(source.id)) el.classList.add('scoped');
+  if (state.selectedNode === 's:' + source.id) el.classList.add('sel');
+
+  el.onclick = () => {
+    state.selectedNode = 's:' + source.id;
+    state.scope.has(source.id) ? state.scope.delete(source.id) : state.scope.add(source.id);
+    renderTree();
+  };
+  el.ondblclick = () => openViewer(source);
+  el.oncontextmenu = e => { e.preventDefault(); sourceMenu(e, source); };
+  el.ondragstart = e => { e.dataTransfer.setData('text/plain', source.id); };
+  return el;
+}
+
+async function drop(folderId) {
+  const id = state.dragging;
+  if (!id) return;
+  await api('/api/sources/' + id, { method: 'PATCH', json: { folder_id: folderId } });
+  state.dragging = null;
+  loadTree();
+}
+document.addEventListener('dragstart', e => {
+  const node = e.target.closest?.('[data-source-id]');
+  state.dragging = node ? node.dataset.sourceId : null;
+});
+
+$('#tree').ondragover = e => { e.preventDefault(); };
+$('#tree').ondrop = e => {
+  if (e.target.closest('[data-folder-id]')) return;
+  e.preventDefault();
+  if (state.dragging) drop(null);
+};
+$('#clearScope').onclick = () => { state.scope.clear(); renderTree(); };
+$('#refreshTree').onclick = loadTree;
+$('#newFolderBtn').onclick = () => createFolder(null);
+$('#newFileBtn').onclick = () => $('#file').click();
+$('#file').onchange = e => { upload([...e.target.files]); e.target.value = ''; };
+
+async function createFolder(parentId) {
+  const name = await askText('New folder', '', 'Create');
+  if (!name) return;
+  const folder = await api('/api/folders', { method: 'POST', json: { name, parent_id: parentId } });
+  if (parentId) state.open.add(parentId);
+  state.open.add(folder.id);
+  loadTree();
+}
+
+/* ----------------------------------------------------------- dialogs */
+/* Native alert, confirm and prompt block the page, cannot be styled, and look
+   nothing like the rest of this. These are the same three shapes, promised. */
+
+function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cancel',
+                  danger = false, input = null, choices = null }) {
+  return new Promise(resolve => {
+    const modal = $('#dialog');
+    const field = $('#dialogField');
+    const actions = $('#dialogActions');
+
+    $('#dialogTitle').textContent = title;
+    $('#dialogMessage').textContent = message;
+    $('#dialogMessage').hidden = !message;
+    field.innerHTML = '';
+    field.hidden = !(input || choices);
+    actions.innerHTML = '';
+
+    let control = null;
+    if (choices) {
+      control = document.createElement('select');
+      for (const c of choices) control.append(new Option(c.label, c.value));
+      field.append(control);
+    } else if (input) {
+      control = document.createElement('input');
+      control.type = 'text';
+      control.value = input.value || '';
+      control.placeholder = input.placeholder || '';
+      field.append(control);
+    }
+
+    const done = value => {
+      modal.hidden = true;
+      document.removeEventListener('keydown', onKey, true);
+      modal.onclick = null;
+      resolve(value);
+    };
+
+    const submit = () => {
+      if (!control) return done(true);
+      const value = control.value.trim();
+      done(value === '' ? null : value);
+    };
+
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); submit(); }
+    };
+
+    let cancel = null;
+    if (cancelLabel) {
+      cancel = document.createElement('button');
+      cancel.className = 'btn ghost';
+      cancel.textContent = cancelLabel;
+      cancel.onclick = () => done(null);
+      actions.append(cancel);
+    }
+    const ok = document.createElement('button');
+    ok.className = danger ? 'btn danger' : 'btn';
+    ok.textContent = confirmLabel;
+    ok.onclick = submit;
+    actions.append(ok);
+
+    modal.hidden = false;
+    modal.onclick = e => { if (e.target === modal) done(null); };
+    document.addEventListener('keydown', onKey, true);
+    // Never hand focus to a destructive button: Enter still confirms, but a
+    // stray space bar cancels rather than deletes.
+    (control || (danger && cancel) || ok).focus();
+    if (control && control.select) control.select();
+  });
+}
+
+const say = (message, title = 'Notice') =>
+  dialog({ title, message, cancelLabel: null, confirmLabel: 'OK' });
+
+const ask = (title, message, confirmLabel = 'Delete') =>
+  dialog({ title, message, confirmLabel, danger: confirmLabel === 'Delete' })
+    .then(value => value !== null);
+
+const askText = (title, value = '', confirmLabel = 'Save') =>
+  dialog({ title, confirmLabel, input: { value } });
+
+const askChoice = (title, message, choices) =>
+  dialog({ title, message, choices, confirmLabel: 'Move' });
+
+/* ------------------------------------------------------ context menu */
+function showMenu(e, items) {
+  // Stop the document handler below from closing the menu we are opening.
+  e.stopPropagation();
+  const ctx = $('#ctx');
+  ctx.innerHTML = '';
+  for (const item of items) {
+    if (item === '-') { ctx.append(Object.assign(document.createElement('div'), { className: 'sep' })); continue; }
+    const b = document.createElement('button');
+    if (item.danger) b.className = 'danger';
+    b.innerHTML = `<span>${esc(item.label)}</span>` +
+                  (item.key ? `<span class="key">${esc(item.key)}</span>` : '');
+    b.onclick = () => { ctx.hidden = true; item.run(); };
+    ctx.append(b);
+  }
+  ctx.hidden = false;
+  const w = ctx.offsetWidth, h = ctx.offsetHeight;
+  ctx.style.left = Math.min(e.clientX, innerWidth - w - 8) + 'px';
+  ctx.style.top = Math.min(e.clientY, innerHeight - h - 8) + 'px';
+}
+document.addEventListener('click', () => { $('#ctx').hidden = true; });
+document.addEventListener('contextmenu', () => { $('#ctx').hidden = true; });
+$('#tree').oncontextmenu = e => {
+  if (e.target.closest('.node')) return;
+  e.preventDefault();
+  showMenu(e, [
+    { label: 'Upload files', run: () => $('#file').click() },
+    { label: 'New folder', run: () => createFolder(null) },
+  ]);
+};
+
+function sourceMenu(e, source) {
+  const folders = state.folders;
+  showMenu(e, [
+    { label: 'Open', key: 'dbl click', run: () => openViewer(source) },
+    { label: state.scope.has(source.id) ? 'Remove from scope' : 'Add to scope',
+      run: () => { state.scope.has(source.id) ? state.scope.delete(source.id)
+                                              : state.scope.add(source.id); renderTree(); } },
+    '-',
+    { label: 'Rename', key: 'F2', run: () => renameSource(source) },
+    ...(folders.length ? [{ label: 'Move to folder', run: () => moveSource(source) }] : []),
+    ...(source.folder_id ? [{ label: 'Move to root', run: async () => {
+        await api('/api/sources/' + source.id, { method: 'PATCH', json: { folder_id: null } });
+        loadTree();
+      } }] : []),
+    { label: 'Re-run analyzer', run: async () => {
+        note(`re-analyzing ${source.title}`);
+        try { await api('/api/sources/' + source.id + '/reingest', { method: 'POST' }); }
+        catch (err) { note(err.message, true); }
+        loadTree();
+      } },
+    '-',
+    { label: 'Delete', danger: true, run: async () => {
+        if (!await ask('Delete source', `"${source.title}" and its index entries go away. The file is removed from storage unless another source shares it.`)) return;
+        await api('/api/sources/' + source.id, { method: 'DELETE' });
+        state.scope.delete(source.id);
+        if (state.viewerSource?.id === source.id) closeViewer();
+        loadTree();
+      } },
+  ]);
+}
+
+function folderMenu(e, folder) {
+  showMenu(e, [
+    { label: 'Upload into folder', run: () => { state.uploadInto = folder.id; $('#file').click(); } },
+    { label: 'New subfolder', run: () => createFolder(folder.id) },
+    '-',
+    { label: 'Rename', run: async () => {
+        const name = await askText('Rename folder', folder.name);
+        if (!name || name === folder.name) return;
+        await api('/api/folders/' + folder.id, { method: 'PATCH', json: { name } });
+        loadTree();
+      } },
+    { label: 'Delete folder', danger: true, run: async () => {
+        if (!await ask('Delete folder', `"${folder.name}" goes away. The files inside it move to the root.`)) return;
+        await api('/api/folders/' + folder.id, { method: 'DELETE' });
+        loadTree();
+      } },
+  ]);
+}
+
+async function renameSource(source) {
+  const name = await askText('Rename source', source.title);
+  if (!name || name === source.title) return;
+  await api('/api/sources/' + source.id, { method: 'PATCH', json: { title: name } });
+  loadTree();
+}
+
+async function moveSource(source) {
+  const choices = state.folders.map(f => ({ value: f.id, label: f.name }));
+  const folderId = await askChoice('Move source', `Where should "${source.title}" go?`,
+                                   choices);
+  if (!folderId) return;
+  await api('/api/sources/' + source.id, { method: 'PATCH', json: { folder_id: folderId } });
+  state.open.add(folderId);
+  loadTree();
+}
+
+/* ------------------------------------------------------------ upload */
+document.addEventListener('dragover', e => {
+  if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); $('#tree').classList.add('drop-root'); }
+});
+document.addEventListener('dragleave', e => {
+  if (!e.relatedTarget) $('#tree').classList.remove('drop-root');
+});
+document.addEventListener('drop', e => {
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  $('#tree').classList.remove('drop-root');
+  const folder = e.target.closest('[data-folder-id]');
+  upload([...e.dataTransfer.files], folder?.dataset.folderId || null);
+});
+
+async function upload(files, folderId) {
+  if (!files.length) return;
+  const target = folderId || state.uploadInto || null;
+  state.uploadInto = null;
+  $('#treeStatus').textContent = `uploading ${files.length} file(s)`;
+
+  const fd = new FormData();
+  for (const f of files) fd.append('file', f);
+  if (target) fd.append('folder_id', target);
+
+  try {
+    const res = await api('/api/sources', { method: 'POST', body: fd });
+    for (const u of res.uploaded) {
+      if (u.ingest_error) note(`${u.source.title}: ${u.ingest_error}`, true);
+    }
+    if (target) state.open.add(target);
+  } catch (e) {
+    note('upload failed: ' + e.message, true);
+  }
+  loadTree();
+}
+
+/* ------------------------------------------------------------ viewer */
+async function openViewer(source) {
+  state.viewerSource = source;
+  state.viewerTab = source.kind === 'text' ? 'rendition'
+                  : (source.kind === 'image' || source.kind === 'pdf') ? 'original' : 'details';
+  document.body.classList.add('with-viewer');
+  $('#viewer').hidden = false;
+  $('#viewerTitle').textContent = source.title;
+  renderViewer();
+}
+function closeViewer() {
+  state.viewerSource = null;
+  document.body.classList.remove('with-viewer');
+  $('#viewer').hidden = true;
+}
+$('#viewerClose').onclick = closeViewer;
+
+async function renderViewer() {
+  const source = state.viewerSource;
+  if (!source) return;
+  const tabs = $('#viewerTabs');
+  tabs.innerHTML = '';
+  for (const [key, label] of [['original', 'Original'], ['rendition', 'Rendition'],
+                              ['details', 'Details']]) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if (state.viewerTab === key) b.className = 'on';
+    b.onclick = () => { state.viewerTab = key; renderViewer(); };
+    tabs.append(b);
+  }
+
+  const body = $('#viewerBody');
+  body.innerHTML = '';
+  const raw = '/api/sources/' + source.id + '/raw';
+
+  if (state.viewerTab === 'original') {
+    if (source.kind === 'image') {
+      const img = document.createElement('img');
+      img.src = raw;
+      body.append(img);
+    } else if (source.kind === 'pdf') {
+      const frame = document.createElement('iframe');
+      frame.src = raw;
+      body.style.padding = '0';
+      body.append(frame);
+    } else if (source.kind === 'video' || source.kind === 'audio') {
+      const el = document.createElement(source.kind);
+      el.src = raw; el.controls = true; el.style.width = '100%';
+      body.append(el);
+    } else {
+      const text = await fetch(raw).then(r => r.text()).catch(() => '');
+      const pre = document.createElement('pre');
+      pre.textContent = text.slice(0, 200000);
+      body.append(pre);
+    }
+    if (source.kind !== 'pdf') body.style.padding = '12px 14px';
+    return;
+  }
+  body.style.padding = '12px 14px';
+
+  if (state.viewerTab === 'rendition') {
+    try {
+      const doc = await api('/api/sources/' + source.id + '/document');
+      const wrap = document.createElement('div');
+      wrap.innerHTML =
+        `<div class="facts" style="margin-bottom:10px">${doc.chunks.length} chunks indexed</div>`;
+      const pre = document.createElement('pre');
+      pre.textContent = doc.document.markdown;
+      wrap.append(pre);
+      body.append(wrap);
+    } catch (e) {
+      const p = document.createElement('div');
+      p.className = 'facts';
+      p.textContent = 'No rendition yet: ' + e.message;
+      body.append(p);
+    }
+    return;
+  }
+
+  const facts = document.createElement('div');
+  facts.className = 'facts';
+  facts.innerHTML = [
+    ['Title', source.title], ['File', source.original_filename || 'none'],
+    ['Kind', source.kind], ['Type', source.media_type], ['Size', bytes(source.byte_size)],
+    ['Status', source.status], ['Added', source.created_at.slice(0, 19).replace('T', ' ')],
+    ['Digest', source.sha256.slice(0, 16)],
+  ].map(([k, v]) => `<div><b>${k}</b> ${esc(String(v))}</div>`).join('');
+  if (source.error) facts.innerHTML += `<div style="color:var(--bad);margin-top:8px">${esc(source.error)}</div>`;
+  body.append(facts);
+}
+
+/* ------------------------------------------------------------- math */
+/* LaTeX to MathML. Browsers render MathML natively, so a subset converter buys
+   real formulas with no library, no fonts and no build step. Anything outside
+   the subset falls back to showing the source, which is what the answer showed
+   before this existed. */
+
+const GREEK = {
+  alpha:'α', beta:'β', gamma:'γ', delta:'δ', epsilon:'ϵ',
+  varepsilon:'ε', zeta:'ζ', eta:'η', theta:'θ', vartheta:'ϑ',
+  iota:'ι', kappa:'κ', lambda:'λ', mu:'μ', nu:'ν', xi:'ξ',
+  pi:'π', rho:'ρ', sigma:'σ', tau:'τ', upsilon:'υ',
+  phi:'ϕ', varphi:'φ', chi:'χ', psi:'ψ', omega:'ω',
+  Gamma:'Γ', Delta:'Δ', Theta:'Θ', Lambda:'Λ', Xi:'Ξ',
+  Pi:'Π', Sigma:'Σ', Upsilon:'Υ', Phi:'Φ', Psi:'Ψ',
+  Omega:'Ω',
+};
+
+const SYMBOL = {
+  times:'×', cdot:'⋅', div:'÷', pm:'±', mp:'∓',
+  leq:'≤', le:'≤', geq:'≥', ge:'≥', neq:'≠', ne:'≠',
+  ll:'≪', gg:'≫', approx:'≈', equiv:'≡', cong:'≅',
+  sim:'∼', simeq:'≃', propto:'∝', infty:'∞', partial:'∂',
+  nabla:'∇', to:'→', rightarrow:'→', longrightarrow:'⟶',
+  leftarrow:'←', Rightarrow:'⇒', Leftarrow:'⇐', mapsto:'↦',
+  in:'∈', notin:'∉', subset:'⊂', subseteq:'⊆', cup:'∪',
+  cap:'∩', emptyset:'∅', forall:'∀', exists:'∃', neg:'¬',
+  land:'∧', lor:'∨', ldots:'…', dots:'…', cdots:'⋯',
+  vdots:'⋮', prime:'′', circ:'∘', deg:'°', angle:'∠',
+  perp:'⊥', parallel:'∥', langle:'⟨', rangle:'⟩',
+  hbar:'ℏ', ell:'ℓ', Re:'ℜ', Im:'ℑ', aleph:'ℵ',
+  star:'⋆', ast:'∗', oplus:'⊕', otimes:'⊗',
+};
+
+const BIG_OPS = {
+  sum:'∑', prod:'∏', coprod:'∐', int:'∫', iint:'∬',
+  iiint:'∭', oint:'∮', bigcup:'⋃', bigcap:'⋂', lim:'lim',
+};
+
+const FUNCS = ['sin','cos','tan','sec','csc','cot','arcsin','arccos','arctan','sinh',
+               'cosh','tanh','log','ln','lg','exp','max','min','sup','inf','det','dim',
+               'ker','arg','gcd','Pr'];
+
+const VARIANTS = { mathbf:'bold', mathbb:'double-struck', mathcal:'script',
+                   mathfrak:'fraktur', mathit:'italic', mathrm:'normal',
+                   mathsf:'sans-serif', mathtt:'monospace', bm:'bold-italic' };
+
+const ACCENTS = { hat:'̂', bar:'¯', vec:'→', tilde:'̃',
+                  dot:'˙', ddot:'¨', overline:'¯' };
+
+const SPACES = { ',':'0.17em', ':':'0.22em', ';':'0.28em', '!':'-0.17em',
+                 quad:'1em', qquad:'2em', ' ':'0.25em' };
+
+function texTokens(src) {
+  const out = [];
+  for (let i = 0; i < src.length;) {
+    const c = src[i];
+    if (c === '\\') {
+      const m = /^\\([a-zA-Z]+|.)/.exec(src.slice(i));
+      if (!m) return null;
+      out.push({ t: 'cmd', v: m[1] });
+      i += m[0].length;
+    } else if ('{}^_'.includes(c)) {
+      out.push({ t: c });
+      i++;
+    } else if (/\s/.test(c)) {
+      i++;
+    } else if (/[0-9]/.test(c)) {
+      const m = /^[0-9]+(\.[0-9]+)?/.exec(src.slice(i));
+      out.push({ t: 'num', v: m[0] });
+      i += m[0].length;
+    } else {
+      out.push({ t: 'ch', v: c });
+      i++;
+    }
+  }
+  return out;
+}
+
+/* Returns a MathML string, or null when the input uses something outside the
+   subset. Null is the signal to show the source instead. */
+function texToMathml(tex, display) {
+  const tokens = texTokens(tex);
+  if (!tokens || !tokens.length) return null;
+
+  let i = 0, failed = false;
+  const OPS = '+-=<>/|(),.;:[]*';
+  const fail = () => { failed = true; return ''; };
+
+  function argument() {
+    if (i >= tokens.length) return fail();
+    if (tokens[i].t === '{') {
+      i++;
+      const body = sequence('}');
+      if (i >= tokens.length || tokens[i].t !== '}') return fail();
+      i++;
+      return '<mrow>' + body + '</mrow>';
+    }
+    const one = scripted();
+    return one == null ? fail() : one;
+  }
+
+  function textArgument() {
+    if (i >= tokens.length || tokens[i].t !== '{') return null;
+    i++;
+    let text = '';
+    while (i < tokens.length && tokens[i].t !== '}') {
+      const tk = tokens[i++];
+      text += tk.v === undefined ? '' : tk.v;
+    }
+    if (i >= tokens.length) return null;
+    i++;
+    return text;
+  }
+
+  function command(name) {
+    if (GREEK[name]) return { html: '<mi>' + GREEK[name] + '</mi>' };
+    if (SYMBOL[name]) return { html: '<mo>' + esc(SYMBOL[name]) + '</mo>' };
+    if (FUNCS.includes(name)) return { html: '<mi>' + name + '</mi>' };
+    if (BIG_OPS[name]) {
+      return { html: '<mo largeop="true">' + esc(BIG_OPS[name]) + '</mo>', big: true };
+    }
+    if (SPACES[name] !== undefined) {
+      return { html: '<mspace width="' + SPACES[name] + '"/>' };
+    }
+    if (name === 'frac' || name === 'dfrac' || name === 'tfrac') {
+      const top = argument(), bottom = argument();
+      return { html: '<mfrac>' + top + bottom + '</mfrac>' };
+    }
+    if (name === 'sqrt') {
+      if (tokens[i] && tokens[i].t === 'ch' && tokens[i].v === '[') {
+        i++;
+        let index = '';
+        while (i < tokens.length && !(tokens[i].t === 'ch' && tokens[i].v === ']')) {
+          const one = scripted();
+          if (one == null) return { html: fail() };
+          index += one;
+        }
+        i++;
+        return { html: '<mroot>' + argument() + '<mrow>' + index + '</mrow></mroot>' };
+      }
+      return { html: '<msqrt>' + argument() + '</msqrt>' };
+    }
+    if (VARIANTS[name]) {
+      const text = textArgument();
+      if (text === null) return { html: fail() };
+      return { html: '<mi mathvariant="' + VARIANTS[name] + '">' + esc(text) + '</mi>' };
+    }
+    if (ACCENTS[name]) {
+      return { html: '<mover accent="true">' + argument() +
+                     '<mo>' + esc(ACCENTS[name]) + '</mo></mover>' };
+    }
+    if (name === 'text' || name === 'textrm' || name === 'mbox' || name === 'operatorname') {
+      const text = textArgument();
+      if (text === null) return { html: fail() };
+      return { html: '<mtext>' + esc(text) + '</mtext>' };
+    }
+    if (name === 'left' || name === 'right') {
+      const fence = tokens[i];
+      if (!fence) return { html: fail() };
+      i++;
+      const glyph = fence.t === 'cmd' ? (SYMBOL[fence.v] || fence.v) : fence.v;
+      if (glyph === '.') return { html: '' };
+      return { html: '<mo stretchy="true">' + esc(glyph) + '</mo>' };
+    }
+    if (name === '{' || name === '}') return { html: '<mo>' + name + '</mo>' };
+    return null;
+  }
+
+  function atom() {
+    const tk = tokens[i];
+    if (!tk) return null;
+
+    if (tk.t === 'num') { i++; return { html: '<mn>' + tk.v + '</mn>' }; }
+    if (tk.t === 'ch') {
+      i++;
+      if (OPS.includes(tk.v)) return { html: '<mo>' + esc(tk.v) + '</mo>' };
+      if (tk.v === "'") return { html: '<mo>′</mo>' };
+      return { html: '<mi>' + esc(tk.v) + '</mi>' };
+    }
+    if (tk.t === '{') {
+      i++;
+      const body = sequence('}');
+      if (i >= tokens.length || tokens[i].t !== '}') { fail(); return { html: '' }; }
+      i++;
+      return { html: '<mrow>' + body + '</mrow>' };
+    }
+    if (tk.t === 'cmd') {
+      i++;
+      const node = command(tk.v);
+      if (node === null) { failed = true; return { html: '' }; }
+      return node;
+    }
+    return null;
+  }
+
+  /* A base plus whatever sub and superscripts follow it. Big operators take
+     their limits above and below in display mode, the way TeX sets them. */
+  function scripted() {
+    const base = atom();
+    if (!base) return null;
+
+    let sub = null, sup = null;
+    while (i < tokens.length && (tokens[i].t === '_' || tokens[i].t === '^')) {
+      const kind = tokens[i].t;
+      i++;
+      const arg = argument();
+      if (kind === '_') sub = arg; else sup = arg;
+    }
+    if (sub === null && sup === null) return base.html;
+
+    const stacked = base.big && display;
+    if (sub !== null && sup !== null) {
+      return stacked ? '<munderover>' + base.html + sub + sup + '</munderover>'
+                     : '<msubsup>' + base.html + sub + sup + '</msubsup>';
+    }
+    if (sub !== null) {
+      return stacked ? '<munder>' + base.html + sub + '</munder>'
+                     : '<msub>' + base.html + sub + '</msub>';
+    }
+    return stacked ? '<mover>' + base.html + sup + '</mover>'
+                   : '<msup>' + base.html + sup + '</msup>';
+  }
+
+  function sequence(stop) {
+    const parts = [];
+    while (i < tokens.length && tokens[i].t !== stop) {
+      const one = scripted();
+      if (one == null || failed) { failed = true; break; }
+      parts.push(one);
+    }
+    return parts.join('');
+  }
+
+  const body = sequence(null);
+  if (failed || i < tokens.length || !body) return null;
+  return '<math display="' + (display ? 'block' : 'inline') + '"><mrow>' +
+         body + '</mrow></math>';
+}
+
+/* -------------------------------------------------------- markdown */
+function markdown(src) {
+  const held = [];
+  const hold = html => '' + (held.push(html) - 1) + '';
+
+  // Code fences and math come out first, so escaping never touches them.
+  let text = src.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
+    hold('<pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>'));
+
+  const renderMath = (tex, display) => {
+    const mathml = texToMathml(tex.trim(), display);
+    if (mathml) return display ? '<div class="math-block">' + mathml + '</div>' : mathml;
+    // Outside the subset: show the source rather than a wrong formula.
+    return display ? '<pre class="math-src">' + esc(tex.trim()) + '</pre>'
+                   : '<span class="math-src">' + esc(tex.trim()) + '</span>';
+  };
+
+  text = text
+    .replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => hold(renderMath(tex, true)))
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, tex) => hold(renderMath(tex, true)))
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, tex) => hold(renderMath(tex, false)))
+    // Inline needs non-space at both ends, so prices stay prices.
+    .replace(/\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, tex) => hold(renderMath(tex, false)));
+
+  const inline = s => esc(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|\W)\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g,
+             '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push('</' + list + '>'); list = null; } };
+
+  for (const line of text.split('\n')) {
+    const solo = line.match(/^(\d+)$/);
+    if (solo) { closeList(); out.push(held[+solo[1]]); continue; }
+    if (!line.trim()) { closeList(); continue; }
+
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    if (heading) {
+      closeList();
+      const level = heading[1].length;
+      out.push('<h' + level + '>' + inline(heading[2]) + '</h' + level + '>');
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      closeList();
+      out.push('<blockquote>' + inline(line.replace(/^>\s?/, '')) + '</blockquote>');
+      continue;
+    }
+    if (/^(-{3,}|\*{3,})$/.test(line.trim())) { closeList(); out.push('<hr>'); continue; }
+
+    const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (bullet || numbered) {
+      const want = bullet ? 'ul' : 'ol';
+      if (list !== want) { closeList(); out.push('<' + want + '>'); list = want; }
+      out.push('<li>' + inline((bullet || numbered)[1]) + '</li>');
+      continue;
+    }
+    closeList();
+    out.push('<p>' + inline(line) + '</p>');
+  }
+  closeList();
+
+  // Put the held blocks back, including any that sat inside a paragraph.
+  return out.join('').replace(/(\d+)/g, (_, n) => held[+n]);
+}
+
+/* --------------------------------------------------------------- chat */
+function emptyState() {
+  if ($('#thread').children.length) return;
+  const el = document.createElement('div');
+  el.className = 'empty-chat';
+  el.textContent = state.sources.length
+    ? 'Ask a question. Click files in the explorer to narrow the search to them.'
+    : 'Add a source to get started.';
+  el.id = 'emptyChat';
+  $('#thread').append(el);
+}
+function clearEmpty() { document.getElementById('emptyChat')?.remove(); }
+
+function userTurn(text) {
+  clearEmpty();
+  const el = document.createElement('div');
+  el.className = 'turn user';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  el.append(bubble);
+  $('#thread').append(el);
+  el.scrollIntoView({ block: 'end' });
+  return el;
+}
+
+function assistantTurn() {
+  clearEmpty();
+  const el = document.createElement('div');
+  el.className = 'turn assistant';
+  el.innerHTML = '<div class="thinking">Thinking</div><div class="body"></div>';
+  $('#thread').append(el);
+  el.scrollIntoView({ block: 'end' });
+
+  const started = Date.now();
+  const label = el.querySelector('.thinking');
+  el.timer = setInterval(() => {
+    label.textContent = `Thinking ${Math.round((Date.now() - started) / 1000)}s`;
+  }, 1000);
+  el.elapsed = () => Math.round((Date.now() - started) / 1000);
+  return el;
+}
+
+function stopTimer(el) {
+  clearInterval(el.timer);
+  el.timer = null;
+}
+
+function note(text, bad) {
+  clearEmpty();
+  const el = document.createElement('div');
+  el.className = 'turn note' + (bad ? ' bad' : '');
+  el.textContent = text;
+  $('#thread').append(el);
+  el.scrollIntoView({ block: 'end' });
+}
+
+function finishTurn(el, res) {
+  const seconds = el.elapsed ? el.elapsed() : 0;
+  stopTimer(el);
+  el.querySelector('.thinking')?.remove();
+  el.querySelector('.body').innerHTML = markdown(res.answer || '');
+
+  const meta = document.createElement('div');
+  meta.className = 'meta-line';
+  const model = document.createElement('span');
+  model.textContent = res.model_display_name +
+    (res.effort && res.effort !== 'off' ? `, ${res.effort} effort` : '') +
+    (seconds ? `, ${seconds}s` : '');
+  meta.append(model);
+  for (const c of res.citations || []) {
+    const b = document.createElement('button');
+    b.className = 'cite';
+    b.textContent = `${c.source_title}${c.locator ? ' ' + c.locator : ''}`;
+    b.onclick = () => {
+      const source = state.sources.find(s => s.id === c.source_id);
+      if (source) openViewer(source);
+    };
+    meta.append(b);
+  }
+  el.append(meta);
+  el.scrollIntoView({ block: 'end' });
+}
+
+const q = $('#q');
+q.addEventListener('input', () => {
+  q.style.height = 'auto';
+  q.style.height = Math.min(q.scrollHeight, 190) + 'px';
+  renderCommands();
+});
+q.addEventListener('keydown', e => {
+  const matches = matchingCommands(q.value);
+  if (matches.length) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      state.cmdIndex = (state.cmdIndex + step + matches.length) % matches.length;
+      renderCommands();
+      return;
+    }
+    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+      e.preventDefault();
+      runCommand(matches[state.cmdIndex] || matches[0]);
+      return;
+    }
+    if (e.key === 'Escape') { $('#cmds').hidden = true; return; }
+  }
+  if (e.key !== 'Enter' || e.shiftKey) return;
+  e.preventDefault();
+  // Ctrl or Cmd with Enter steers: stop what is running and ask this instead.
+  submitInput(e.ctrlKey || e.metaKey);
+});
+$('#send').onclick = () => composer.busy ? stopTurn() : submitInput(false);
+
+/* One turn at a time. Anything typed while a turn is running is queued and sent
+   when it finishes, unless it is steered, which stops the run and jumps ahead. */
+const composer = { busy: false, controller: null, queue: [] };
+
+function setBusy(on) {
+  composer.busy = on;
+  const b = $('#send');
+  b.classList.toggle('stop', on);
+  b.innerHTML = on ? '<span class="sq"></span>' : '&#8629;';
+  b.title = on ? 'Stop (Esc)' : 'Send (Enter)';
+}
+
+function submitInput(steerNow) {
+  const text = q.value.trim();
+  if (!text) return;
+  q.value = ''; q.style.height = 'auto';
+
+  if (!composer.busy) return runTurn(text);
+  composer.queue.unshift({ text });
+  renderQueue();
+  if (steerNow) stopTurn();
+}
+
+function renderQueue() {
+  const wrap = $('#queue');
+  wrap.innerHTML = '';
+  wrap.hidden = !composer.queue.length;
+  if (wrap.hidden) return;
+
+  const head = document.createElement('div');
+  head.className = 'qhead';
+  head.textContent = `${composer.queue.length} queued`;
+  wrap.append(head);
+
+  for (const item of composer.queue) {
+    const chip = document.createElement('div');
+    chip.className = 'qchip';
+    const text = document.createElement('span');
+    text.className = 'qtext';
+    text.textContent = item.text;
+    const steer = document.createElement('button');
+    steer.className = 'steer';
+    steer.textContent = 'Ask now';
+    steer.title = 'Stop the current answer and ask this instead';
+    steer.onclick = () => {
+      composer.queue = [item, ...composer.queue.filter(x => x !== item)];
+      renderQueue();
+      composer.busy ? stopTurn() : drainQueue();
+    };
+    const drop = document.createElement('button');
+    drop.textContent = '×';
+    drop.title = 'Remove';
+    drop.onclick = () => {
+      composer.queue = composer.queue.filter(x => x !== item);
+      renderQueue();
+    };
+    chip.append(text, steer, drop);
+    wrap.append(chip);
+  }
+}
+
+/* Aborting the fetch closes the connection, and axum drops the handler with it,
+   which cancels the call out to the provider. Nothing was persisted yet either,
+   so a stopped exchange leaves no trace in the conversation. */
+function stopTurn() {
+  composer.controller?.abort();
+}
+
+function drainQueue() {
+  const next = composer.queue.shift();
+  renderQueue();
+  if (next) runTurn(next.text);
+}
+
+async function runTurn(text) {
+  userTurn(text);
+  const turn = assistantTurn();
+  const controller = new AbortController();
+  composer.controller = controller;
+  setBusy(true);
+
+  try {
+    const res = await api('/api/chat', {
+      method: 'POST',
+      signal: controller.signal,
+      json: {
+        message: text,
+        conversation_id: state.conversationId,
+        source_ids: [...state.scope],
+        model_id: state.activeModel?.id || null,
+      },
+    });
+    state.conversationId = res.conversation_id;
+    localStorage.setItem(LAST_CHAT_KEY, res.conversation_id);
+    setUrl(res.conversation_id, { replace: true });
+    state.context = { used: res.context_used, window: res.context_window };
+    renderContext();
+    finishTurn(turn, res);
+    loadChats();
+  } catch (e) {
+    stopTimer(turn);
+    if (e.name === 'AbortError') {
+      turn.querySelector('.thinking').textContent = 'Stopped';
+    } else {
+      turn.remove();
+      note(e.message, true);
+    }
+  } finally {
+    composer.controller = null;
+    setBusy(false);
+    drainQueue();
+  }
+}
+
+$('#searchBtn').onclick = async () => {
+  const text = q.value.trim();
+  if (!text) return;
+  const res = await api('/api/search?q=' + encodeURIComponent(text));
+  if (!res.hits.length) return note('No matches in the index.');
+  clearEmpty();
+  const el = document.createElement('div');
+  el.className = 'turn assistant';
+  el.innerHTML = '<div class="body">' + res.hits.map(h =>
+    `<p><b>${esc(h.source_title)}</b> <span class="hint">${esc(h.locator || '')}</span><br>` +
+    `${markdown(h.snippet)}</p>`).join('') + '</div>';
+  $('#thread').append(el);
+  el.scrollIntoView({ block: 'end' });
+};
+
+/* ------------------------------------------------------ conversations */
+const LAST_CHAT_KEY = 'notebook.conversation';
+
+/* The address bar is the permalink: /c/<id> for a conversation, / for a fresh
+   one. History entries mean back and forward walk the conversations too. */
+function conversationFromUrl() {
+  const m = location.pathname.match(/^\/c\/([\w-]+)$/);
+  return m ? m[1] : null;
+}
+
+function setUrl(id, { replace = false } = {}) {
+  const path = id ? '/c/' + id : '/';
+  if (location.pathname === path) return;
+  history[replace ? 'replaceState' : 'pushState']({ conversation: id }, '', path);
+}
+
+window.addEventListener('popstate', () => {
+  const id = conversationFromUrl();
+  if (id === state.conversationId) return;
+  if (id) openConversation(id, { fromHistory: true });
+  else newConversation({ fromHistory: true });
+});
+
+async function loadChats() {
+  const { conversations } = await api('/api/conversations');
+  state.chats = conversations;
+  const list = $('#chatList');
+  list.innerHTML = '';
+
+  if (!conversations.length) {
+    const empty = document.createElement('div');
+    empty.className = 'chat-empty';
+    empty.textContent = 'No conversations yet.';
+    list.append(empty);
+    return;
+  }
+
+  for (const c of conversations) {
+    const row = document.createElement('div');
+    row.className = 'chat-row' + (c.id === state.conversationId ? ' on' : '');
+    row.innerHTML = '<span class="ct"></span>' +
+      (c.compacted ? '<span class="dot" title="Compacted">&#9679;</span>' : '') +
+      '<span class="when"></span>';
+    row.querySelector('.ct').textContent = c.title;
+    row.querySelector('.when').textContent = ago(c.updated_at);
+    row.title = `${c.message_count} message(s), updated ${c.updated_at.slice(0, 16).replace('T', ' ')}`;
+    row.onclick = () => openConversation(c.id);
+    row.oncontextmenu = e => { e.preventDefault(); chatMenu(e, c); };
+
+    const kill = document.createElement('button');
+    kill.className = 'kill';
+    kill.textContent = '\u00d7';
+    kill.title = 'Delete conversation';
+    kill.onclick = e => { e.stopPropagation(); deleteConversation(c); };
+    row.append(kill);
+
+    list.append(row);
+  }
+}
+
+function ago(iso) {
+  const seconds = (Date.now() - new Date(iso)) / 1000;
+  if (seconds < 90) return 'now';
+  if (seconds < 3600) return Math.round(seconds / 60) + 'm';
+  if (seconds < 86400) return Math.round(seconds / 3600) + 'h';
+  return Math.round(seconds / 86400) + 'd';
+}
+
+function chatMenu(e, chat) {
+  showMenu(e, [
+    { label: 'Open', run: () => openConversation(chat.id) },
+    { label: 'Rename', run: async () => {
+        const title = await askText('Rename conversation', chat.title);
+        if (!title || title === chat.title) return;
+        await api('/api/conversations/' + chat.id, { method: 'PATCH', json: { title } });
+        loadChats();
+      } },
+    { label: 'Compact context', run: () => {
+        if (chat.id !== state.conversationId) openConversation(chat.id).then(compactConversation);
+        else compactConversation();
+      } },
+    '-',
+    { label: 'Delete', danger: true, run: () => deleteConversation(chat) },
+  ]);
+}
+
+async function deleteConversation(chat) {
+  if (!await ask('Delete conversation', `"${chat.title}" and every message in it go away.`)) return;
+  try {
+    await api('/api/conversations/' + chat.id, { method: 'DELETE' });
+  } catch (e) {
+    return note(e.message, true);
+  }
+  if (state.conversationId === chat.id) newConversation();
+  else loadChats();
+}
+
+function newConversation({ fromHistory = false } = {}) {
+  state.conversationId = null;
+  state.context = { used: 0, window: state.activeModel?.context_window || 0 };
+  localStorage.removeItem(LAST_CHAT_KEY);
+  if (!fromHistory) setUrl(null);
+  $('#thread').innerHTML = '';
+  renderContext();
+  emptyState();
+  loadChats();
+}
+$('#newChatBtn').onclick = newConversation;
+
+/* Reopening a conversation redraws the whole transcript, compacted turns
+   included, with a divider marking where the context was folded away. */
+async function openConversation(id, { fromHistory = false } = {}) {
+  let data;
+  try {
+    data = await api('/api/conversations/' + id);
+  } catch (e) {
+    // A stale link or a deleted conversation should not strand the page.
+    localStorage.removeItem(LAST_CHAT_KEY);
+    if (conversationFromUrl() === id) setUrl(null, { replace: true });
+    note('That conversation is gone: ' + e.message, true);
+    return;
+  }
+
+  state.conversationId = id;
+  localStorage.setItem(LAST_CHAT_KEY, id);
+  if (!fromHistory) setUrl(id);
+  $('#thread').innerHTML = '';
+
+  let dividerDrawn = false;
+  for (const m of data.messages) {
+    if (!m.compacted && !dividerDrawn && data.conversation.summary) {
+      drawDivider('context compacted above');
+      dividerDrawn = true;
+    }
+    if (m.role === 'user') {
+      userTurn(m.content);
+    } else if (m.role === 'assistant') {
+      const el = assistantTurn();
+      stopTimer(el);
+      finishTurn(el, {
+        answer: m.content,
+        citations: JSON.parse(m.citations || '[]'),
+        model_display_name: m.model || 'assistant',
+        effort: 'off',
+      });
+    }
+  }
+  if (data.conversation.summary && !dividerDrawn) drawDivider('context compacted');
+  if (!data.messages.length) emptyState();
+
+  // The meter shows what the last turn actually cost, not zero.
+  state.context = {
+    used: data.context_used || 0,
+    window: state.activeModel?.context_window || 0,
+  };
+  renderContext();
+  loadChats();
+}
+
+function drawDivider(text) {
+  const el = document.createElement('div');
+  el.className = 'divider';
+  el.textContent = text;
+  $('#thread').append(el);
+}
+
+/* ------------------------------------------------------------ commands */
+const COMMANDS = [
+  {
+    name: 'compact',
+    hint: 'Summarise this conversation and clear the context',
+    run: compactConversation,
+  },
+];
+
+async function compactConversation() {
+  if (!state.conversationId) return note('Nothing to compact: this conversation is empty.');
+  note('Compacting the conversation');
+  try {
+    const res = await api('/api/conversations/' + state.conversationId + '/compact',
+      { method: 'POST' });
+    $('#thread').lastElementChild.remove();
+    drawDivider(`context compacted, ${res.compacted_messages} turns folded into a summary`);
+    state.context = { used: 0, window: state.activeModel?.context_window || 0 };
+    renderContext();
+    loadChats();
+  } catch (e) {
+    $('#thread').lastElementChild.remove();
+    note(e.message, true);
+  }
+}
+
+function matchingCommands(text) {
+  if (!text.startsWith('/') || /\s/.test(text)) return [];
+  const needle = text.slice(1).toLowerCase();
+  return COMMANDS.filter(c => c.name.startsWith(needle));
+}
+
+function renderCommands() {
+  const box = $('#cmds');
+  const matches = matchingCommands(q.value);
+  box.innerHTML = '';
+  box.hidden = !matches.length;
+  if (box.hidden) { state.cmdIndex = 0; return; }
+
+  state.cmdIndex = Math.min(state.cmdIndex || 0, matches.length - 1);
+  matches.forEach((cmd, i) => {
+    const b = document.createElement('button');
+    b.className = 'cmd' + (i === state.cmdIndex ? ' on' : '');
+    b.innerHTML = '<span class="cname"></span><span class="chint"></span>';
+    b.children[0].textContent = '/' + cmd.name;
+    b.children[1].textContent = cmd.hint;
+    b.onclick = () => runCommand(cmd);
+    box.append(b);
+  });
+}
+
+function runCommand(cmd) {
+  q.value = '';
+  q.style.height = 'auto';
+  $('#cmds').hidden = true;
+  state.cmdIndex = 0;
+  cmd.run();
+}
+
+/* --------------------------------------------------------- prompt bar */
+function togglePop(id) {
+  for (const p of document.querySelectorAll('.pop'))
+    p.hidden = p.id === id ? !p.hidden : true;
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('.pop') && !e.target.closest('.chip'))
+    for (const p of document.querySelectorAll('.pop')) p.hidden = true;
+  if (!e.target.closest('#presetMenu') && !e.target.closest('#addProviderBtn'))
+    $('#presetMenu').hidden = true;
+});
+
+$('#modelBtn').onclick = () => { renderModelPop(); togglePop('modelPop'); };
+$('#effortBtn').onclick = () => togglePop('effortPop');
+$('#ctxBtn').onclick = () => togglePop('ctxPop');
+
+function renderModelPop() {
+  const pop = $('#modelPop');
+  pop.innerHTML = '';
+  const offered = state.settings.pinned || [];
+
+  if (!offered.length) {
+    const h = document.createElement('div');
+    h.className = 'hint';
+    h.style.padding = '10px';
+    h.textContent = 'No models yet. Add a provider in Configure.';
+    pop.append(h);
+  } else if (!state.settings.any_pinned) {
+    const h = document.createElement('h3');
+    h.textContent = 'All models. Pin some in Configure.';
+    pop.append(h);
+  }
+
+  for (const m of offered) {
+    const b = document.createElement('button');
+    b.className = 'row';
+    const active = state.activeModel?.id === m.id;
+    b.innerHTML = '<span></span><span class="sub"></span>';
+    b.children[0].textContent = m.display_name;
+    b.children[1].textContent = active ? '✓' : m.provider_name;
+    if (active) b.children[1].className = 'tick';
+    b.setAttribute('aria-label', `${m.display_name} (${m.provider_name})`);
+    b.onclick = async () => {
+      state.activeModel = m;
+      state.context = { used: 0, window: m.context_window };
+      togglePop('modelPop');
+      renderBar();
+      try {
+        state.settings = await api('/api/settings',
+          { method: 'PATCH', json: { researcher_model: m.id } });
+      } catch (e) { note(e.message, true); }
+    };
+    pop.append(b);
+  }
+
+  pop.append(Object.assign(document.createElement('div'), { className: 'sep' }));
+  const cfg = document.createElement('button');
+  cfg.className = 'row';
+  cfg.innerHTML = '<span>Configure</span><span class="sub">&#8250;</span>';
+  cfg.setAttribute('aria-label', 'Configure models');
+  cfg.onclick = () => { togglePop(null); openConfigure(); };
+  pop.append(cfg);
+}
+
+const EFFORTS = [
+  ['off', 'Off', 'no reasoning budget'], ['low', 'Low', 'quick'],
+  ['medium', 'Medium', 'balanced'], ['high', 'High', 'longest'],
+];
+function renderEffort() {
+  const list = $('#effortList');
+  list.innerHTML = '';
+  for (const [key, label, hint] of EFFORTS) {
+    const b = document.createElement('button');
+    b.className = 'row';
+    b.innerHTML = '<span></span><span class="sub"></span>';
+    b.children[0].textContent = label;
+    const on = state.settings.thinking_effort === key;
+    b.children[1].textContent = on ? '✓' : hint;
+    if (on) b.children[1].className = 'tick';
+    b.onclick = async () => {
+      state.settings = await api('/api/settings',
+        { method: 'PATCH', json: { thinking_effort: key } });
+      renderBar(); renderEffort(); togglePop('effortPop');
+    };
+    list.append(b);
+  }
+}
+
+function renderContext() {
+  const { used, window: win } = state.context;
+  const pct = win ? Math.min(100, (used / win) * 100) : 0;
+  const circumference = 2 * Math.PI * 9.5;
+  $('#ctxRing').setAttribute('stroke-dashoffset', circumference * (1 - pct / 100));
+  $('#ctxBar').style.width = pct + '%';
+  $('#ctxText').textContent = win
+    ? `${used ? fmt(used) : '0'} / ${fmt(win)} (${pct.toFixed(pct < 10 ? 1 : 0)}%)`
+    : 'no data';
+  $('#ctxNote').textContent = used
+    ? "Tokens on the last turn, against this model's window."
+    : state.conversationId ? "Nothing measured in this conversation yet."
+    : "Nothing in context yet.";
+}
+
+function renderBar() {
+  $('#modelBtn').textContent = state.activeModel
+    ? state.activeModel.display_name : 'Select model';
+  const effort = state.settings.thinking_effort || 'off';
+  $('#effortBtn').textContent = effort[0].toUpperCase() + effort.slice(1);
+  $('#effortBtn').classList.toggle('strong', effort !== 'off');
+  renderContext();
+}
+
+async function loadSettings() {
+  state.settings = await api('/api/settings');
+  const r = state.settings.researcher;
+  state.activeModel = r ? (state.settings.pinned.find(m => m.id === r.id) || r) : null;
+  if (!state.context.used && state.activeModel)
+    state.context.window = state.activeModel.context_window || 0;
+  renderBar(); renderEffort();
+}
+
+/* ---------------------------------------------------------- configure */
+function openConfigure() { $('#configure').hidden = false; loadConfigure(); }
+$('#closeConfig').onclick = () => { $('#configure').hidden = true; loadSettings(); };
+$('#modelSearch').oninput = renderModelTable;
+$('#providerFilter').onchange = loadConfigure;
+$('#showHidden').onchange = loadConfigure;
+
+async function loadConfigure() {
+  const params = new URLSearchParams();
+  if ($('#showHidden').checked) params.set('include_hidden', 'true');
+  if ($('#providerFilter').value) params.set('provider_id', $('#providerFilter').value);
+
+  const [me, models, providers] = await Promise.all([
+    api('/api/me'), api('/api/models?' + params), api('/api/providers'),
+  ]);
+  $('#userBadge').textContent = me.user.name.toLowerCase();
+  state.models = models.models;
+  state.providers = providers.providers;
+  state.roles = { researcher: models.researcher_model, analyzer: models.analyzer_model };
+  $('#hiddenCount').textContent = models.hidden_count ? `(${models.hidden_count})` : '';
+
+  const filter = $('#providerFilter');
+  const keep = filter.value;
+  filter.innerHTML = '<option value="">All providers</option>';
+  for (const p of state.providers) filter.append(new Option(p.name, p.id));
+  filter.value = keep;
+
+  renderModelTable();
+  renderProviderTable();
+}
+
+function mkBtn(text, cls, onclick) {
+  const b = document.createElement('button');
+  b.className = cls;
+  b.textContent = text;
+  b.onclick = onclick;
+  return b;
+}
+async function patchModel(id, patch) {
+  await api('/api/models/' + id, { method: 'PATCH', json: patch });
+  loadConfigure();
+}
+
+function renderModelTable() {
+  const needle = $('#modelSearch').value.toLowerCase();
+  const rows = $('#modelRows');
+  rows.innerHTML = '';
+  const list = state.models.filter(m =>
+    !needle || (m.display_name + m.model_id + m.provider_name).toLowerCase().includes(needle));
+  $('#modelEmpty').hidden = state.models.length > 0;
+
+  for (const m of list) {
+    const tr = document.createElement('tr');
+    if (m.hidden) tr.className = 'hidden-model';
+
+    const name = document.createElement('td');
+    name.innerHTML = '<b></b><div class="hint"></div>';
+    name.querySelector('b').textContent = m.display_name;
+    name.querySelector('.hint').textContent =
+      m.display_name === m.model_id ? '' : m.model_id;
+    tr.append(name);
+
+    const prov = document.createElement('td');
+    prov.className = 'hint';
+    prov.textContent = `${m.provider_name}, ${m.api_style}`;
+    tr.append(prov);
+
+    const ctx = document.createElement('td');
+    ctx.className = 'num';
+    ctx.textContent = fmt(m.context_window);
+    tr.append(ctx);
+
+    const caps = document.createElement('td');
+    for (const [field, label] of [['supports_vision', 'vision'], ['supports_tools', 'tools'],
+                                  ['supports_thinking', 'thinking']]) {
+      const tag = document.createElement('button');
+      tag.className = 'tag' + (m[field] ? ' on' : '');
+      tag.textContent = label;
+      tag.title = 'Click to toggle';
+      tag.onclick = () => patchModel(m.id, { [field]: !m[field] });
+      caps.append(tag);
+    }
+    tr.append(caps);
+
+    const role = document.createElement('td');
+    const sel = document.createElement('select');
+    for (const [v, label] of [['', 'none'], ['researcher', 'researcher'], ['analyzer', 'analyzer']])
+      sel.append(new Option(label, v));
+    sel.value = state.roles.researcher === m.id ? 'researcher'
+              : state.roles.analyzer === m.id ? 'analyzer' : '';
+    sel.onchange = async () => {
+      if (!sel.value) return;
+      await api('/api/settings', { method: 'PATCH', json: { [sel.value + '_model']: m.id } });
+      loadConfigure();
+    };
+    role.append(sel);
+    tr.append(role);
+
+    const actions = document.createElement('td');
+    actions.className = 'actions';
+    actions.append(
+      mkBtn(m.pinned ? 'Unpin' : 'Pin', 'btn ghost sm', () => patchModel(m.id, { pinned: !m.pinned })),
+      mkBtn(m.hidden ? 'Show' : 'Hide', 'btn ghost sm', () => patchModel(m.id, { hidden: !m.hidden })),
+      mkBtn('Remove', 'btn danger sm', async () => {
+        await api('/api/models/' + m.id, { method: 'DELETE' });
+        loadConfigure();
+      }),
+    );
+    tr.append(actions);
+    rows.append(tr);
+  }
+}
+
+function renderProviderTable() {
+  const rows = $('#providerRows');
+  rows.innerHTML = '';
+  $('#providerEmpty').hidden = state.providers.length > 0;
+
+  for (const p of state.providers) {
+    const tr = document.createElement('tr');
+    for (const [i, text] of [p.name, p.base_url, p.api_style,
+                             p.key_hint || 'no key', `${p.model_count}`].entries()) {
+      const td = document.createElement('td');
+      td.textContent = text;
+      if (i) td.className = 'hint';
+      tr.append(td);
+    }
+    const actions = document.createElement('td');
+    actions.className = 'actions';
+    actions.append(
+      mkBtn('Refresh models', 'btn ghost sm', async e => {
+        e.target.textContent = 'Refreshing';
+        try {
+          const r = await api('/api/providers/' + p.id + '/refresh', { method: 'POST' });
+          await loadConfigure();
+          note(`${p.name}: ${r.total} models available, ${r.added} new` +
+               (r.non_chat ? `, ${r.non_chat} non chat hidden` : ''));
+        } catch (err) {
+          e.target.textContent = 'Refresh models';
+          say(err.message, 'Could not read that endpoint');
+        }
+      }),
+      mkBtn('Edit', 'btn ghost sm', () => openProviderForm(null, p)),
+      mkBtn('Remove', 'btn danger sm', async () => {
+        if (!await ask('Remove provider',
+                       `${p.name}, its stored key and its ${p.model_count} model(s) go away.`,
+                       'Remove')) return;
+        await api('/api/providers/' + p.id, { method: 'DELETE' });
+        loadConfigure();
+      }),
+    );
+    tr.append(actions);
+    rows.append(tr);
+  }
+}
+
+/* ----------------------------------------------------- provider form */
+$('#addProviderBtn').onclick = async e => {
+  e.stopPropagation();
+  const menu = $('#presetMenu');
+  if (!menu.dataset.loaded) {
+    const { presets } = await api('/api/providers/presets');
+    menu.innerHTML = '';
+    for (const p of presets) {
+      if (p.key === 'custom')
+        menu.append(Object.assign(document.createElement('div'), { className: 'sep' }));
+      const b = document.createElement('button');
+      b.className = 'row';
+      b.innerHTML = '<span></span><span class="sub"></span>';
+      b.children[0].textContent = p.name;
+      b.children[1].textContent = p.api_style === 'anthropic' ? 'anthropic' : 'openai';
+      b.onclick = () => { menu.hidden = true; openProviderForm(p, null); };
+      menu.append(b);
+    }
+    menu.dataset.loaded = '1';
+  }
+  menu.hidden = !menu.hidden;
+};
+
+function openProviderForm(preset, existing) {
+  state.editingProvider = existing;
+  $('#providerForm').hidden = false;
+  $('#pfTitle').textContent = existing ? `Edit ${existing.name}` : `Add ${preset.name}`;
+  $('#pfName').value = existing ? existing.name : preset.name;
+  $('#pfStyle').value = existing ? existing.api_style : preset.api_style;
+  $('#pfUrl').value = existing ? existing.base_url : preset.base_url;
+  $('#pfKey').value = '';
+  $('#pfKey').placeholder = existing && existing.has_key
+    ? 'unchanged, type to replace' : 'stored server side, never returned';
+  $('#pfStyle').disabled = !!existing;
+  $('#pfHint').className = 'hint';
+  $('#pfHint').textContent = existing
+    ? 'Use Refresh models afterwards to re-read the catalogue.'
+    : "Saving reads the endpoint's model list and imports it.";
+}
+$('#pfCancel').onclick = () => { $('#providerForm').hidden = true; };
+
+$('#pfSave').onclick = async () => {
+  const payload = {
+    name: $('#pfName').value.trim(),
+    api_style: $('#pfStyle').value,
+    base_url: $('#pfUrl').value.trim(),
+    api_key: $('#pfKey').value,
+  };
+  const hint = $('#pfHint');
+  try {
+    if (state.editingProvider) {
+      const patch = { name: payload.name, base_url: payload.base_url };
+      if (payload.api_key) patch.api_key = payload.api_key;
+      await api('/api/providers/' + state.editingProvider.id, { method: 'PATCH', json: patch });
+      $('#providerForm').hidden = true;
+      await loadConfigure();
+    } else {
+      const res = await api('/api/providers', { method: 'POST', json: payload });
+      await loadConfigure();
+      if (res.import_error) {
+        hint.className = 'hint bad';
+        hint.textContent = `Provider saved, but its model list failed: ${res.import_error}`;
+      } else {
+        $('#providerForm').hidden = true;
+        note(`${payload.name}: imported ${res.imported} models`);
+      }
+    }
+  } catch (e) {
+    hint.className = 'hint bad';
+    hint.textContent = e.message;
+  }
+};
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (composer.busy) { stopTurn(); return; }
+    $('#ctx').hidden = true;
+    for (const p of document.querySelectorAll('.pop')) p.hidden = true;
+  }
+  if (e.key === 'F2' && state.selectedNode?.startsWith('s:')) {
+    const source = state.sources.find(s => 's:' + s.id === state.selectedNode);
+    if (source) renameSource(source);
+  }
+});
+
+(async () => {
+  await loadTree();
+  await loadSettings();
+  await loadChats();
+  const wanted = conversationFromUrl() || localStorage.getItem(LAST_CHAT_KEY);
+  if (wanted) await openConversation(wanted, { fromHistory: true });
+  setUrl(state.conversationId, { replace: true });
+  emptyState();
+})();
+</script>
+</body>
+</html>

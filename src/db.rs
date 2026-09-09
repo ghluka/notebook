@@ -1,0 +1,610 @@
+//! SQLite access. Runtime queries only, so the build never needs a live DB.
+
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{Row, SqlitePool};
+
+pub type Db = SqlitePool;
+
+pub async fn connect(database_url: &str) -> anyhow::Result<Db> {
+    let opts = SqliteConnectOptions::from_str(database_url)?
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .busy_timeout(std::time::Duration::from_secs(10));
+
+    let pool = SqlitePoolOptions::new().max_connections(8).connect_with(opts).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
+    Ok(pool)
+}
+
+pub fn now() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+pub fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+// ---------------------------------------------------------------- sources
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Source {
+    pub id: String,
+    pub owner_id: String,
+    pub folder_id: Option<String>,
+    pub title: String,
+    pub original_filename: Option<String>,
+    pub kind: String,
+    pub media_type: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub storage_path: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub metadata: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewSource {
+    pub owner_id: String,
+    pub folder_id: Option<String>,
+    pub title: String,
+    pub original_filename: Option<String>,
+    pub kind: String,
+    pub media_type: String,
+    pub byte_size: i64,
+    pub sha256: String,
+    pub storage_path: String,
+}
+
+pub async fn insert_source(db: &Db, s: NewSource) -> sqlx::Result<Source> {
+    let id = new_id();
+    let ts = now();
+    sqlx::query(
+        "INSERT INTO sources (id, owner_id, folder_id, title, original_filename, kind,
+                              media_type, byte_size, sha256, storage_path, status,
+                              metadata, created_at, updated_at)
+         VALUES (?1, ?10, ?11, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', '{}', ?9, ?9)",
+    )
+    .bind(&id)
+    .bind(&s.title)
+    .bind(&s.original_filename)
+    .bind(&s.kind)
+    .bind(&s.media_type)
+    .bind(s.byte_size)
+    .bind(&s.sha256)
+    .bind(&s.storage_path)
+    .bind(&ts)
+    .bind(&s.owner_id)
+    .bind(&s.folder_id)
+    .execute(db)
+    .await?;
+
+    get_source(db, &id).await?.ok_or(sqlx::Error::RowNotFound)
+}
+
+pub async fn get_source(db: &Db, id: &str) -> sqlx::Result<Option<Source>> {
+    sqlx::query_as::<_, Source>("SELECT * FROM sources WHERE id = ?1")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+}
+
+pub async fn list_sources(db: &Db, owner: &str) -> sqlx::Result<Vec<Source>> {
+    sqlx::query_as::<_, Source>(
+        "SELECT * FROM sources WHERE owner_id = ?1 ORDER BY title COLLATE NOCASE",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
+/// Rename a source or move it between folders. `None` leaves a field alone;
+/// moving to the root is `folder_id: Some(None)`.
+pub async fn update_source(
+    db: &Db,
+    id: &str,
+    title: Option<&str>,
+    folder_id: Option<Option<String>>,
+) -> sqlx::Result<()> {
+    if let Some(title) = title {
+        sqlx::query("UPDATE sources SET title = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(title)
+            .bind(now())
+            .execute(db)
+            .await?;
+    }
+    if let Some(folder_id) = folder_id {
+        sqlx::query("UPDATE sources SET folder_id = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(id)
+            .bind(folder_id)
+            .bind(now())
+            .execute(db)
+            .await?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- folders
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Folder {
+    pub id: String,
+    pub owner_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub created_at: String,
+}
+
+pub async fn list_folders(db: &Db, owner: &str) -> sqlx::Result<Vec<Folder>> {
+    sqlx::query_as::<_, Folder>(
+        "SELECT * FROM folders WHERE owner_id = ?1 ORDER BY name COLLATE NOCASE",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
+pub async fn create_folder(
+    db: &Db,
+    owner: &str,
+    name: &str,
+    parent_id: Option<&str>,
+) -> sqlx::Result<Folder> {
+    let id = new_id();
+    sqlx::query(
+        "INSERT INTO folders (id, owner_id, parent_id, name, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&id)
+    .bind(owner)
+    .bind(parent_id)
+    .bind(name)
+    .bind(now())
+    .execute(db)
+    .await?;
+
+    sqlx::query_as::<_, Folder>("SELECT * FROM folders WHERE id = ?1")
+        .bind(&id)
+        .fetch_one(db)
+        .await
+}
+
+pub async fn update_folder(
+    db: &Db,
+    owner: &str,
+    id: &str,
+    name: Option<&str>,
+    parent_id: Option<Option<String>>,
+) -> sqlx::Result<()> {
+    if let Some(name) = name {
+        sqlx::query("UPDATE folders SET name = ?3 WHERE id = ?1 AND owner_id = ?2")
+            .bind(id)
+            .bind(owner)
+            .bind(name)
+            .execute(db)
+            .await?;
+    }
+    if let Some(parent_id) = parent_id {
+        sqlx::query("UPDATE folders SET parent_id = ?3 WHERE id = ?1 AND owner_id = ?2")
+            .bind(id)
+            .bind(owner)
+            .bind(parent_id)
+            .execute(db)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Deleting a folder keeps the files: they fall back to the root.
+pub async fn delete_folder(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM folders WHERE id = ?1 AND owner_id = ?2")
+        .bind(id)
+        .bind(owner)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_source_status(
+    db: &Db,
+    id: &str,
+    status: &str,
+    error: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sources SET status = ?2, error = ?3, updated_at = ?4 WHERE id = ?1")
+        .bind(id)
+        .bind(status)
+        .bind(error)
+        .bind(now())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_source(db: &Db, id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM sources WHERE id = ?1").bind(id).execute(db).await?;
+    Ok(())
+}
+
+/// How many sources still point at this blob, which decides whether the file
+/// on disk can go.
+pub async fn count_sources_with_sha(db: &Db, sha256: &str) -> sqlx::Result<i64> {
+    let row = sqlx::query("SELECT count(*) AS n FROM sources WHERE sha256 = ?1")
+        .bind(sha256)
+        .fetch_one(db)
+        .await?;
+    Ok(row.get::<i64, _>("n"))
+}
+
+// -------------------------------------------------------------- documents
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Document {
+    pub id: String,
+    pub source_id: String,
+    pub markdown: String,
+    pub summary: Option<String>,
+    pub analyzer_model: Option<String>,
+    pub created_at: String,
+}
+
+pub async fn get_document(db: &Db, source_id: &str) -> sqlx::Result<Option<Document>> {
+    sqlx::query_as::<_, Document>("SELECT * FROM documents WHERE source_id = ?1")
+        .bind(source_id)
+        .fetch_optional(db)
+        .await
+}
+
+/// One rendition per source: replacing it drops the old chunks with it.
+pub async fn replace_document(
+    db: &Db,
+    source_id: &str,
+    markdown: &str,
+    summary: Option<&str>,
+    analyzer_model: Option<&str>,
+    chunks: &[NewChunk],
+) -> sqlx::Result<String> {
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM documents WHERE source_id = ?1")
+        .bind(source_id)
+        .execute(&mut *tx)
+        .await?;
+
+    let doc_id = new_id();
+    sqlx::query(
+        "INSERT INTO documents (id, source_id, markdown, summary, analyzer_model, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )
+    .bind(&doc_id)
+    .bind(source_id)
+    .bind(markdown)
+    .bind(summary)
+    .bind(analyzer_model)
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+
+    for (i, c) in chunks.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO chunks (id, source_id, document_id, ordinal, heading, locator,
+                                 content, token_estimate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(new_id())
+        .bind(source_id)
+        .bind(&doc_id)
+        .bind(i as i64)
+        .bind(&c.heading)
+        .bind(&c.locator)
+        .bind(&c.content)
+        .bind((c.content.len() / 4) as i64)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(doc_id)
+}
+
+// ----------------------------------------------------------------- chunks
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewChunk {
+    pub heading: Option<String>,
+    pub locator: Option<String>,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct SearchHit {
+    pub chunk_id: String,
+    pub source_id: String,
+    pub source_title: String,
+    pub heading: Option<String>,
+    pub locator: Option<String>,
+    pub ordinal: i64,
+    pub snippet: String,
+    pub score: f64,
+}
+
+const SEARCH_SQL: &str = "
+    SELECT c.id           AS chunk_id,
+           c.source_id    AS source_id,
+           s.title        AS source_title,
+           c.heading      AS heading,
+           c.locator      AS locator,
+           c.ordinal      AS ordinal,
+           snippet(chunks_fts, 0, '**', '**', ' ... ', 32) AS snippet,
+           bm25(chunks_fts) AS score
+    FROM chunks_fts
+    JOIN chunks  c ON c.id = chunks_fts.chunk_id
+    JOIN sources s ON s.id = c.source_id
+    WHERE chunks_fts MATCH ?1
+      AND (?2 IS NULL OR c.source_id = ?2)
+    ORDER BY score
+    LIMIT ?3";
+
+/// Free-text search over chunk renditions. Tries all-terms first, then any-term,
+/// so a long natural-language question still returns something.
+pub async fn search_chunks(
+    db: &Db,
+    query: &str,
+    source_id: Option<&str>,
+    limit: i64,
+) -> sqlx::Result<Vec<SearchHit>> {
+    let terms = fts_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    for joiner in [" AND ", " OR "] {
+        let expr = terms.join(joiner);
+        let hits = sqlx::query_as::<_, SearchHit>(SEARCH_SQL)
+            .bind(&expr)
+            .bind(source_id)
+            .bind(limit)
+            .fetch_all(db)
+            .await?;
+        if !hits.is_empty() {
+            return Ok(hits);
+        }
+    }
+    Ok(Vec::new())
+}
+
+pub async fn chunks_for_source(db: &Db, source_id: &str) -> sqlx::Result<Vec<SearchHit>> {
+    sqlx::query_as::<_, SearchHit>(
+        "SELECT c.id AS chunk_id, c.source_id AS source_id, s.title AS source_title,
+                c.heading AS heading, c.locator AS locator, c.ordinal AS ordinal,
+                c.content AS snippet, 0.0 AS score
+         FROM chunks c JOIN sources s ON s.id = c.source_id
+         WHERE c.source_id = ?1 ORDER BY c.ordinal",
+    )
+    .bind(source_id)
+    .fetch_all(db)
+    .await
+}
+
+/// Turn arbitrary user text into FTS5 terms. Everything is quoted, so operator
+/// characters in a question can never produce a malformed MATCH expression.
+fn fts_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() > 1)
+        .take(24)
+        .map(|t| format!("\"{}\"", t.to_lowercase()))
+        .collect()
+}
+
+// ---------------------------------------------------------- conversations
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Conversation {
+    pub id: String,
+    pub owner_id: String,
+    pub title: String,
+    /// Set once the conversation has been compacted. Stands in for every
+    /// message marked `compacted` when the next prompt is assembled.
+    pub summary: Option<String>,
+    pub summarized_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+pub async fn create_conversation(db: &Db, owner: &str, title: &str) -> sqlx::Result<Conversation> {
+    let id = new_id();
+    let ts = now();
+    sqlx::query(
+        "INSERT INTO conversations (id, owner_id, title, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+    )
+    .bind(&id)
+    .bind(owner)
+    .bind(title)
+    .bind(&ts)
+    .execute(db)
+    .await?;
+    get_conversation(db, owner, &id).await?.ok_or(sqlx::Error::RowNotFound)
+}
+
+pub async fn get_conversation(
+    db: &Db,
+    owner: &str,
+    id: &str,
+) -> sqlx::Result<Option<Conversation>> {
+    sqlx::query_as::<_, Conversation>(
+        "SELECT * FROM conversations WHERE id = ?1 AND owner_id = ?2",
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_optional(db)
+    .await
+}
+
+/// One row per conversation for the sidebar, newest first.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ConversationSummary {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub message_count: i64,
+    pub compacted: bool,
+}
+
+pub async fn list_conversations(db: &Db, owner: &str) -> sqlx::Result<Vec<ConversationSummary>> {
+    sqlx::query_as::<_, ConversationSummary>(
+        "SELECT c.id, c.title, c.created_at, c.updated_at,
+                (SELECT count(*) FROM messages m WHERE m.conversation_id = c.id)
+                    AS message_count,
+                (c.summary IS NOT NULL) AS compacted
+           FROM conversations c
+          WHERE c.owner_id = ?1
+            AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+          ORDER BY c.updated_at DESC",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
+pub async fn rename_conversation(db: &Db, owner: &str, id: &str, title: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE conversations SET title = ?3 WHERE id = ?1 AND owner_id = ?2")
+        .bind(id)
+        .bind(owner)
+        .bind(title)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn delete_conversation(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM conversations WHERE id = ?1 AND owner_id = ?2")
+        .bind(id)
+        .bind(owner)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Fold everything said so far into `summary` and mark it compacted. The rows
+/// stay so the transcript still reads in full.
+pub async fn compact_conversation(
+    db: &Db,
+    owner: &str,
+    id: &str,
+    summary: &str,
+) -> sqlx::Result<i64> {
+    let mut tx = db.begin().await?;
+    let marked = sqlx::query(
+        "UPDATE messages SET compacted = 1
+          WHERE compacted = 0
+            AND conversation_id IN (SELECT id FROM conversations
+                                     WHERE id = ?1 AND owner_id = ?2)",
+    )
+    .bind(id)
+    .bind(owner)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected() as i64;
+
+    sqlx::query(
+        "UPDATE conversations SET summary = ?3, summarized_at = ?4, updated_at = ?4
+          WHERE id = ?1 AND owner_id = ?2",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(summary)
+    .bind(now())
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(marked)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct StoredMessage {
+    pub id: String,
+    pub conversation_id: String,
+    pub role: String,
+    pub content: String,
+    pub tool_calls: Option<String>,
+    pub citations: Option<String>,
+    pub compacted: bool,
+    pub model: Option<String>,
+    /// Present on assistant turns, so reopening a conversation can restore the
+    /// context meter rather than showing zero.
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+pub async fn append_message(
+    db: &Db,
+    conversation_id: &str,
+    role: &str,
+    content: &str,
+    citations: Option<&str>,
+    model: Option<&str>,
+    usage: Option<Usage>,
+) -> sqlx::Result<String> {
+    let id = new_id();
+    sqlx::query(
+        "INSERT INTO messages (id, conversation_id, role, content, citations, model,
+                               input_tokens, output_tokens, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )
+    .bind(&id)
+    .bind(conversation_id)
+    .bind(role)
+    .bind(content)
+    .bind(citations)
+    .bind(model)
+    .bind(usage.map(|u| u.input_tokens as i64))
+    .bind(usage.map(|u| u.output_tokens as i64))
+    .bind(now())
+    .execute(db)
+    .await?;
+    sqlx::query("UPDATE conversations SET updated_at = ?2 WHERE id = ?1")
+        .bind(conversation_id)
+        .bind(now())
+        .execute(db)
+        .await?;
+    Ok(id)
+}
+
+/// Everything ever said, for display.
+pub async fn conversation_messages(db: &Db, id: &str) -> sqlx::Result<Vec<StoredMessage>> {
+    sqlx::query_as::<_, StoredMessage>(
+        "SELECT * FROM messages WHERE conversation_id = ?1 ORDER BY created_at, id",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+}
+
+/// What the next prompt should carry: only what has not been compacted away.
+pub async fn active_messages(db: &Db, id: &str) -> sqlx::Result<Vec<StoredMessage>> {
+    sqlx::query_as::<_, StoredMessage>(
+        "SELECT * FROM messages
+          WHERE conversation_id = ?1 AND compacted = 0
+          ORDER BY created_at, id",
+    )
+    .bind(id)
+    .fetch_all(db)
+    .await
+}
