@@ -33,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sources/{id}/ask", post(sources::ask))
         .route("/search", get(sources::search))
         .route("/chat", post(chat::chat))
+        .route("/chat/stream", post(chat::stream))
         .route("/conversations", get(conversations::list))
         .route(
             "/conversations/{id}",

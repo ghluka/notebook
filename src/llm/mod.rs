@@ -14,6 +14,8 @@ pub mod types;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use futures::Stream;
+use std::pin::Pin;
 
 pub use types::*;
 
@@ -99,6 +101,56 @@ const MAX_WAIT: u64 = 120;
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &'static str;
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError>;
+    /// The same turn as a token stream. The default refuses, which lets
+    /// callers fall back to one-shot `chat` for providers that never learned
+    /// to stream.
+    async fn chat_stream(&self, req: &ChatRequest) -> Result<TokenStream, LlmError> {
+        let _ = req;
+        Err(LlmError::Request("this provider does not support streaming".into()))
+    }
+}
+
+/// Tokens as they arrive. Only the establishment of the stream is retried
+/// (see `chat_stream_with_retry`): once tokens flow, an error ends the turn
+/// instead of restarting it halfway through an answer.
+pub type TokenStream = Pin<Box<dyn Stream<Item = Result<StreamEvent, LlmError>> + Send>>;
+
+/// One SSE record: the optional `event:` name and its `data:` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SseRecord {
+    pub event: Option<String>,
+    pub data: String,
+}
+
+/// Pull complete records off the front of `buf`, leaving the partial tail in
+/// place. Comments and keep-alives carry no data and are dropped.
+pub fn split_sse_records(buf: &mut String) -> Vec<SseRecord> {
+    let mut out = Vec::new();
+    loop {
+        let end = match (buf.find("\r\n\r\n"), buf.find("\n\n")) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let Some(end) = end else { break };
+        let sep = if buf.as_bytes()[end] == b'\r' { 4 } else { 2 };
+        let raw: String = buf.drain(..end + sep).collect();
+        let mut event = None;
+        let mut data = Vec::new();
+        for line in raw.lines() {
+            if let Some(name) = line.strip_prefix("event:") {
+                event = Some(name.trim().to_string());
+            } else if let Some(payload) = line.strip_prefix("data:") {
+                data.push(payload.strip_prefix(' ').unwrap_or(payload));
+            }
+        }
+        if data.is_empty() {
+            continue;
+        }
+        out.push(SseRecord { event, data: data.join("\n") });
+    }
+    out
 }
 
 /// Call a provider, waiting out rate limits on the schedule in `RETRY_WAITS`.
@@ -143,6 +195,55 @@ pub async fn chat_with_schedule(
 
     match client.chat(req).await {
         Ok(response) => Ok(response),
+        Err(LlmError::Api { status, body, .. }) => {
+            Err(LlmError::RateLimited { status, body, waited })
+        }
+        Err(e) if e.is_retryable() => {
+            Err(LlmError::RateLimited { status: 0, body: e.to_string(), waited })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Open a token stream, waiting out rate limits on the same schedule. Only
+/// the handshake is retried: a refusal to stream at all (a 400 naming the
+/// `stream` parameter, a provider without support) comes back at once so the
+/// caller can fall back to one-shot chat for that round.
+pub async fn chat_stream_with_retry(
+    client: &dyn LlmProvider,
+    req: &ChatRequest,
+) -> Result<TokenStream, LlmError> {
+    chat_stream_with_schedule(client, req, RETRY_WAITS).await
+}
+
+/// The same, with the waits given explicitly. Tests pass zeroes.
+pub async fn chat_stream_with_schedule(
+    client: &dyn LlmProvider,
+    req: &ChatRequest,
+    waits: &[u64],
+) -> Result<TokenStream, LlmError> {
+    let mut waited = 0;
+
+    for (attempt, base) in waits.iter().enumerate() {
+        match client.chat_stream(req).await {
+            Ok(stream) => return Ok(stream),
+            Err(e) if e.is_retryable() => {
+                let wait = e.retry_after().unwrap_or(*base).clamp(*base, MAX_WAIT.max(*base));
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    wait_seconds = wait,
+                    error = %e,
+                    "provider is busy, waiting before retrying the stream"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                waited += wait;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    match client.chat_stream(req).await {
+        Ok(stream) => Ok(stream),
         Err(LlmError::Api { status, body, .. }) => {
             Err(LlmError::RateLimited { status, body, waited })
         }
@@ -281,5 +382,109 @@ mod tests {
 
         assert!(!err.is_rate_limited());
         assert_eq!(flaky.calls.load(Ordering::SeqCst), 1, "must not retry a 400");
+    }
+
+    #[test]
+    fn splits_records_across_chunk_boundaries() {
+        let mut buf = "event: message_start\ndata: {\"a\":1}\n\ndata: {\"b\"".to_string();
+        let first = split_sse_records(&mut buf);
+        assert_eq!(
+            first,
+            vec![SseRecord { event: Some("message_start".into()), data: "{\"a\":1}".into() }]
+        );
+        // The partial tail waits for the rest.
+        assert!(buf.contains("{\"b\""));
+
+        buf.push_str(":2}\n\n:keep-alive\n\n");
+        let rest = split_sse_records(&mut buf);
+        assert_eq!(rest, vec![SseRecord { event: None, data: "{\"b\":2}".into() }]);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn understands_crlf_and_multi_line_data() {
+        let mut buf = "event: ping\r\ndata: one\r\ndata: two\r\n\r\n".to_string();
+        let out = split_sse_records(&mut buf);
+        assert_eq!(out, vec![SseRecord { event: Some("ping".into()), data: "one\ntwo".into() }]);
+    }
+
+    /// A provider that streams canned events, failing `fail_times` handshakes
+    /// first, so the retry schedule has something to chew on.
+    struct Scripted {
+        calls: AtomicUsize,
+        fail_times: usize,
+        events: Vec<StreamEvent>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for Scripted {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+
+        async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+            unreachable!("streaming tests never call one-shot chat");
+        }
+
+        async fn chat_stream(&self, _req: &ChatRequest) -> Result<TokenStream, LlmError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_times {
+                return Err(LlmError::Api {
+                    status: 503,
+                    body: "high demand".into(),
+                    retry_after: None,
+                });
+            }
+            let events = self
+                .events
+                .iter()
+                .cloned()
+                .map(Ok)
+                .collect::<Vec<Result<StreamEvent, LlmError>>>();
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_recover_after_a_busy_handshake() {
+        use futures::StreamExt;
+        let scripted = Scripted {
+            calls: AtomicUsize::new(0),
+            fail_times: 1,
+            events: vec![
+                StreamEvent::Text("hel".into()),
+                StreamEvent::Text("lo".into()),
+                StreamEvent::Done(StreamDone {
+                    tool_calls: Vec::new(),
+                    input_tokens: 3,
+                    output_tokens: 2,
+                }),
+            ],
+        };
+        let Ok(mut stream) = chat_stream_with_schedule(&scripted, &request(), &[0, 0, 0]).await
+        else {
+            panic!("expected a stream after the retry");
+        };
+        let mut text = String::new();
+        let mut done = None;
+        while let Some(ev) = stream.next().await {
+            match ev.unwrap() {
+                StreamEvent::Text(t) => text.push_str(&t),
+                StreamEvent::Done(d) => done = Some(d),
+            }
+        }
+        assert_eq!(text, "hello");
+        assert_eq!(done.unwrap().output_tokens, 2);
+        assert_eq!(scripted.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn providers_without_streaming_say_so_at_once() {
+        let flaky = Flaky::new(0, 200, "");
+        let Err(err) = chat_stream_with_schedule(&flaky, &request(), &[0, 0, 0]).await else {
+            panic!("expected streaming to be refused");
+        };
+        assert!(!err.is_rate_limited());
+        assert!(err.to_string().contains("streaming"));
     }
 }

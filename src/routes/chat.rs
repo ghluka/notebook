@@ -11,12 +11,16 @@
 
 use axum::Json;
 use axum::extract::State;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::db::{self, SearchHit};
 use crate::error::{AppError, AppResult};
-use crate::llm::{ChatRequest, ChatResponse, ContentPart, Effort, Message, Role, Tool};
+use crate::llm::{
+    ChatRequest, ContentPart, Effort, LlmError, LlmProvider, Message, Role, StreamEvent, Tool,
+    ToolCall,
+};
 use crate::models;
 use crate::state::AppState;
 
@@ -424,14 +428,23 @@ async fn run_tool(
     }
 }
 
-pub async fn chat(
-    State(state): State<AppState>,
-    Json(body): Json<ChatBody>,
-) -> AppResult<Json<ChatResponseBody>> {
-    if body.message.trim().is_empty() {
-        return Err(AppError::BadRequest("message is empty".into()));
-    }
+/// Everything a turn needs before the model is called: the same for a
+/// one-shot answer and a streamed one, so a failure here is still a plain
+/// HTTP error in both.
+struct PreparedTurn {
+    existing: Option<db::Conversation>,
+    resolved: models::Resolved,
+    effort: Effort,
+    budget_chars: usize,
+    seen: Vec<SearchHit>,
+    messages: Vec<Message>,
+    tools: Vec<Tool>,
+}
 
+async fn prepare_turn(
+    state: &AppState,
+    body: &ChatBody,
+) -> AppResult<(PreparedTurn, Box<dyn LlmProvider>)> {
     // Created only after the model answers, so a stopped or failed turn does not
     // leave an empty conversation behind.
     let existing = match &body.conversation_id {
@@ -466,7 +479,7 @@ pub async fn chat(
     };
 
     let limit = body.max_hits.unwrap_or(HITS_PER_SEARCH).clamp(1, 30);
-    let mut seen = search_expanded(&state, &body.message, &body.source_ids, limit).await?;
+    let seen = search_expanded(state, &body.message, &body.source_ids, limit).await?;
 
     // A compaction summary stands in for the turns it replaced, then whatever
     // has been said since, then the excerpts, then the question.
@@ -508,75 +521,187 @@ pub async fn chat(
     let tools =
         if resolved.model.supports_tools { researcher_tools(&body.source_ids) } else { vec![] };
 
-    let mut input_tokens = 0;
-    let mut output_tokens = 0;
-    let mut tool_log: Vec<String> = Vec::new();
-    let mut read_sources: Vec<(String, String)> = Vec::new();
-    let mut response: ChatResponse;
+    Ok((
+        PreparedTurn { existing, resolved, effort, budget_chars, seen, messages, tools },
+        client,
+    ))
+}
 
-    // The loop: answer, or ask for more and come back.
-    let mut round = 0;
-    loop {
-        let request = ChatRequest::new(&resolved.model.model_id, messages.clone())
-            .system(SYSTEM)
-            .tools(tools.clone())
-            .max_tokens(resolved.model.max_output_tokens as u32)
-            .effort(effort);
+/// What one model round produced, however it arrived.
+struct RoundOutcome {
+    text: String,
+    tool_calls: Vec<ToolCall>,
+    input_tokens: u32,
+    output_tokens: u32,
+}
 
-        response = crate::llm::chat_with_retry(client.as_ref(), &request).await.map_err(|e| {
-            if e.is_rate_limited() {
-                AppError::from_rate_limit(
-                    e,
-                    &resolved.model.id,
-                    &resolved.model.display_name,
-                    " while answering",
-                )
-            } else {
-                AppError::Llm(e)
-            }
-        })?;
-        input_tokens += response.usage.input_tokens;
-        output_tokens += response.usage.output_tokens;
+/// The client end of the SSE turn. A closed receiver means the person went
+/// away, and the turn stops quietly: nothing is sent, nothing is persisted.
+type TokenSink = futures::channel::mpsc::UnboundedSender<Result<Event, axum::Error>>;
 
-        if response.tool_calls.is_empty() || round >= MAX_TOOL_ROUNDS {
-            break;
-        }
-
-        messages.push(response.as_message());
-        let mut results = Vec::new();
-        for call in &response.tool_calls {
-            tool_log.push(match call.name.as_str() {
-                "search_sources" => format!(
-                    "searched {}",
-                    call.arguments["query"].as_str().unwrap_or_default()
-                ),
-                "read_source" => format!(
-                    "read {} from line {}",
-                    call.arguments["title"].as_str().unwrap_or_default(),
-                    call.arguments["from_line"].as_u64().unwrap_or(1)
-                ),
-                other => other.to_string(),
-            });
-            let output = run_tool(
-                &state,
-                call,
-                &body.source_ids,
-                &mut seen,
-                &mut read_sources,
-                budget_chars,
-            )
-            .await?;
-            results.push(ContentPart::ToolResult {
-                tool_use_id: call.id.clone(),
-                content: output,
-                is_error: false,
-            });
-        }
-        messages.push(Message { role: Role::Tool, content: results });
-        round += 1;
+fn emit_json(tx: &TokenSink, event: &'static str, value: serde_json::Value) {
+    if tx.is_closed() {
+        return;
     }
+    match Event::default().event(event).json_data(value) {
+        Ok(ev) => {
+            let _ = tx.unbounded_send(Ok(ev));
+        }
+        // The payloads are strings and counters; this cannot realistically
+        // happen, and an error event is the honest fallback if it does.
+        Err(e) => send_error(tx, &AppError::Internal(anyhow::anyhow!(e))),
+    }
+}
 
-    let mut citations: Vec<Citation> = cited_hits(&response.text, &seen)
+fn send_error(tx: &TokenSink, e: &AppError) {
+    if tx.is_closed() {
+        return;
+    }
+    // `payload` carries the rate-limit kind and model alongside the prose, so
+    // the client can treat it like the HTTP failure it would have been.
+    let event = Event::default()
+        .event("error")
+        .json_data(e.payload())
+        .unwrap_or_else(|_| Event::default().event("error").data("stream failed"));
+    let _ = tx.unbounded_send(Ok(event));
+}
+
+/// One trip to the model. Without a sink this is the old one-shot call; with
+/// one, tokens stream to the client as they arrive and the full text is still
+/// returned for citations and persistence.
+async fn run_round(
+    client: &dyn LlmProvider,
+    request: &ChatRequest,
+    resolved: &models::Resolved,
+    tokens: Option<&TokenSink>,
+) -> AppResult<RoundOutcome> {
+    let rate_limit = |e: LlmError| {
+        if e.is_rate_limited() {
+            AppError::from_rate_limit(
+                e,
+                &resolved.model.id,
+                &resolved.model.display_name,
+                " while answering",
+            )
+        } else {
+            AppError::Llm(e)
+        }
+    };
+    let Some(tx) = tokens else {
+        let r = crate::llm::chat_with_retry(client, request).await.map_err(rate_limit)?;
+        return Ok(RoundOutcome {
+            text: r.text,
+            tool_calls: r.tool_calls,
+            input_tokens: r.usage.input_tokens,
+            output_tokens: r.usage.output_tokens,
+        });
+    };
+
+    match crate::llm::chat_stream_with_retry(client, request).await {
+        Ok(stream) => {
+            use futures::StreamExt;
+            let mut stream = stream;
+            let mut text = String::new();
+            let mut done = crate::llm::StreamDone::default();
+            while let Some(ev) = stream.next().await {
+                if tx.is_closed() {
+                    return Err(AppError::Internal(anyhow::anyhow!("client went away")));
+                }
+                match ev.map_err(rate_limit)? {
+                    StreamEvent::Text(t) => {
+                        text.push_str(&t);
+                        emit_json(tx, "token", json!({ "t": t }));
+                    }
+                    StreamEvent::Done(d) => done = d,
+                }
+            }
+            Ok(RoundOutcome {
+                text,
+                tool_calls: done.tool_calls,
+                input_tokens: done.input_tokens,
+                output_tokens: done.output_tokens,
+            })
+        }
+        // Endpoints that never learned `stream` fail the handshake naming it.
+        // Answer one-shot for that round and forward it as a single token, so
+        // the turn still streams from the client's point of view.
+        Err(e) if is_stream_unsupported(&e) => {
+            tracing::info!("streaming refused, answering one-shot for this round");
+            let r = crate::llm::chat_with_retry(client, request).await.map_err(rate_limit)?;
+            emit_json(tx, "token", json!({ "t": r.text }));
+            Ok(RoundOutcome {
+                text: r.text,
+                tool_calls: r.tool_calls,
+                input_tokens: r.usage.input_tokens,
+                output_tokens: r.usage.output_tokens,
+            })
+        }
+        Err(e) => Err(rate_limit(e)),
+    }
+}
+
+/// A 400 or 422 naming the `stream` parameter is a no, not a rate limit.
+fn is_stream_unsupported(e: &LlmError) -> bool {
+    match e {
+        LlmError::Api { status, body, .. } => {
+            matches!(status, 400 | 404 | 422) && body.to_ascii_lowercase().contains("stream")
+        }
+        _ => false,
+    }
+}
+
+/// The assistant message to append before running tools, shared by both paths.
+fn assistant_message(outcome: &RoundOutcome) -> Message {
+    let mut content = Vec::new();
+    if !outcome.text.is_empty() {
+        content.push(ContentPart::text(outcome.text.clone()));
+    }
+    for call in &outcome.tool_calls {
+        content.push(ContentPart::ToolUse {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            input: call.arguments.clone(),
+        });
+    }
+    Message { role: Role::Assistant, content }
+}
+
+/// How a tool call reads in the turn's margin and meta line.
+fn tool_log_line(call: &ToolCall) -> String {
+    match call.name.as_str() {
+        "search_sources" => {
+            format!("searched {}", call.arguments["query"].as_str().unwrap_or_default())
+        }
+        "read_source" => format!(
+            "read {} from line {}",
+            call.arguments["title"].as_str().unwrap_or_default(),
+            call.arguments["from_line"].as_u64().unwrap_or(1)
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// Citations, conversation and persistence: everything after the final text is
+/// known. Runs only on success, so a stopped or failed turn still leaves no
+/// trace either way it was asked.
+/// Tokens summed over every round of the turn.
+#[derive(Default)]
+struct TurnUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+async fn finish_turn(
+    state: &AppState,
+    prep: &PreparedTurn,
+    message: &str,
+    text: &str,
+    usage: TurnUsage,
+    read_sources: Vec<(String, String)>,
+    tool_log: Vec<String>,
+) -> AppResult<ChatResponseBody> {
+    let (input_tokens, output_tokens) = (usage.input_tokens, usage.output_tokens);
+    let mut citations: Vec<Citation> = cited_hits(text, &prep.seen)
         .into_iter()
         .map(|h| Citation {
             source_id: h.source_id.clone(),
@@ -591,7 +716,7 @@ pub async fn chat(
     // to what the answer visibly reuses, then to what it deliberately opened.
     // An answer that reuses nothing gets no citations, which is the point.
     if citations.is_empty() {
-        citations = echoed_hits(&response.text, &seen)
+        citations = echoed_hits(text, &prep.seen)
             .into_iter()
             .map(|h| Citation {
                 source_id: h.source_id.clone(),
@@ -615,41 +740,215 @@ pub async fn chat(
             .collect();
     }
 
-    let conversation_id = match existing {
-        Some(c) => c.id,
+    let conversation_id = match &prep.existing {
+        Some(c) => c.id.clone(),
         None => {
-            let title: String = body.message.chars().take(60).collect();
+            let title: String = message.chars().take(60).collect();
             db::create_conversation(&state.db, &state.user_id, &title).await?.id
         }
     };
 
-    db::append_message(&state.db, &conversation_id, "user", &body.message, None, None, None)
-        .await?;
+    db::append_message(&state.db, &conversation_id, "user", message, None, None, None).await?;
     db::append_message(
         &state.db,
         &conversation_id,
         "assistant",
-        &response.text,
+        text,
         Some(&json!(&citations).to_string()),
-        Some(&resolved.model.display_name),
+        Some(&prep.resolved.model.display_name),
         Some(db::Usage { input_tokens, output_tokens }),
     )
     .await?;
 
-    Ok(Json(ChatResponseBody {
+    Ok(ChatResponseBody {
         conversation_id,
-        answer: response.text,
+        answer: text.to_string(),
         citations,
-        model: response.model,
-        model_display_name: resolved.model.display_name.clone(),
-        effort: effort.as_str().to_string(),
+        model: prep.resolved.model.model_id.clone(),
+        model_display_name: prep.resolved.model.display_name.clone(),
+        effort: prep.effort.as_str().to_string(),
         input_tokens,
         output_tokens,
         context_used: input_tokens + output_tokens,
-        context_window: resolved.model.context_window,
-        excerpts_searched: seen.len(),
+        context_window: prep.resolved.model.context_window,
+        excerpts_searched: prep.seen.len(),
         tool_calls: tool_log,
-    }))
+    })
+}
+
+pub async fn chat(
+    State(state): State<AppState>,
+    Json(body): Json<ChatBody>,
+) -> AppResult<Json<ChatResponseBody>> {
+    if body.message.trim().is_empty() {
+        return Err(AppError::BadRequest("message is empty".into()));
+    }
+
+    let (mut prep, client) = prepare_turn(&state, &body).await?;
+
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut tool_log: Vec<String> = Vec::new();
+    let mut read_sources: Vec<(String, String)> = Vec::new();
+
+    // The loop: answer, or ask for more and come back.
+    let mut round = 0;
+    let outcome = loop {
+        let request = ChatRequest::new(&prep.resolved.model.model_id, prep.messages.clone())
+            .system(SYSTEM)
+            .tools(prep.tools.clone())
+            .max_tokens(prep.resolved.model.max_output_tokens as u32)
+            .effort(prep.effort);
+
+        let outcome = run_round(client.as_ref(), &request, &prep.resolved, None).await?;
+        input_tokens += outcome.input_tokens;
+        output_tokens += outcome.output_tokens;
+
+        if outcome.tool_calls.is_empty() || round >= MAX_TOOL_ROUNDS {
+            break outcome;
+        }
+
+        prep.messages.push(assistant_message(&outcome));
+        let mut results = Vec::new();
+        for call in &outcome.tool_calls {
+            tool_log.push(tool_log_line(call));
+            let output = run_tool(
+                &state,
+                call,
+                &body.source_ids,
+                &mut prep.seen,
+                &mut read_sources,
+                prep.budget_chars,
+            )
+            .await?;
+            results.push(ContentPart::ToolResult {
+                tool_use_id: call.id.clone(),
+                content: output,
+                is_error: false,
+            });
+        }
+        prep.messages.push(Message { role: Role::Tool, content: results });
+        round += 1;
+    };
+
+    Ok(Json(
+        finish_turn(
+            &state,
+            &prep,
+            &body.message,
+            &outcome.text,
+            TurnUsage { input_tokens, output_tokens },
+            read_sources,
+            tool_log,
+        )
+        .await?,
+    ))
+}
+
+/// The same turn as server-sent events: `token` carries prose as it arrives,
+/// `tool` narrates each tool call, and `done` carries the whole
+/// `ChatResponseBody` so the client finalizes exactly like a one-shot answer.
+/// An `error` event ends a failed turn; like the one-shot path, nothing is
+/// persisted unless the turn completes.
+pub async fn stream(
+    State(state): State<AppState>,
+    Json(body): Json<ChatBody>,
+) -> AppResult<Sse<impl futures::Stream<Item = Result<Event, axum::Error>>>> {
+    if body.message.trim().is_empty() {
+        return Err(AppError::BadRequest("message is empty".into()));
+    }
+    let (prep, client) = prepare_turn(&state, &body).await?;
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    tokio::spawn(run_stream_turn(state, body, prep, client, tx));
+    Ok(Sse::new(rx).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))))
+}
+
+async fn run_stream_turn(
+    state: AppState,
+    body: ChatBody,
+    mut prep: PreparedTurn,
+    client: Box<dyn LlmProvider>,
+    tx: TokenSink,
+) {
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut tool_log: Vec<String> = Vec::new();
+    let mut read_sources: Vec<(String, String)> = Vec::new();
+    let mut round = 0;
+
+    loop {
+        if tx.is_closed() {
+            return;
+        }
+        let request = ChatRequest::new(&prep.resolved.model.model_id, prep.messages.clone())
+            .system(SYSTEM)
+            .tools(prep.tools.clone())
+            .max_tokens(prep.resolved.model.max_output_tokens as u32)
+            .effort(prep.effort);
+
+        let outcome = match run_round(client.as_ref(), &request, &prep.resolved, Some(&tx)).await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                send_error(&tx, &e);
+                return;
+            }
+        };
+        input_tokens += outcome.input_tokens;
+        output_tokens += outcome.output_tokens;
+
+        if outcome.tool_calls.is_empty() || round >= MAX_TOOL_ROUNDS {
+            if tx.is_closed() {
+                return;
+            }
+            match finish_turn(
+                &state,
+                &prep,
+                &body.message,
+                &outcome.text,
+                TurnUsage { input_tokens, output_tokens },
+                read_sources,
+                tool_log,
+            )
+            .await
+            {
+                Ok(res) => emit_json(&tx, "done", json!(res)),
+                Err(e) => send_error(&tx, &e),
+            }
+            return;
+        }
+
+        prep.messages.push(assistant_message(&outcome));
+        let mut results = Vec::new();
+        for call in &outcome.tool_calls {
+            let line = tool_log_line(call);
+            tool_log.push(line.clone());
+            emit_json(&tx, "tool", json!({ "t": line }));
+            let output = match run_tool(
+                &state,
+                call,
+                &body.source_ids,
+                &mut prep.seen,
+                &mut read_sources,
+                prep.budget_chars,
+            )
+            .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    send_error(&tx, &e);
+                    return;
+                }
+            };
+            results.push(ContentPart::ToolResult {
+                tool_use_id: call.id.clone(),
+                content: output,
+                is_error: false,
+            });
+        }
+        prep.messages.push(Message { role: Role::Tool, content: results });
+        round += 1;
+    }
 }
 
 #[cfg(test)]
@@ -735,5 +1034,107 @@ mod tests {
         // One pill for the file, not one per excerpt from it.
         assert_eq!(used.len(), 1);
         assert_eq!(used[0].locator.as_deref(), Some("line 1"));
+    }
+
+    #[test]
+    fn only_a_stream_refusal_falls_back_to_one_shot() {
+        use crate::llm::LlmError;
+        let refused = LlmError::Api {
+            status: 400,
+            body: "Invalid content part type: stream must be boolean".into(),
+            retry_after: None,
+        };
+        assert!(is_stream_unsupported(&refused));
+        let plain_400 = LlmError::Api {
+            status: 400,
+            body: "model does not accept image parts".into(),
+            retry_after: None,
+        };
+        assert!(!is_stream_unsupported(&plain_400));
+        assert!(!is_stream_unsupported(&LlmError::Request("nope".into())));
+    }
+
+    fn scripted_resolved() -> models::Resolved {
+        models::Resolved {
+            model: models::Model {
+                id: "m1".into(),
+                provider_id: "p1".into(),
+                model_id: "test-model".into(),
+                display_name: "Test".into(),
+                context_window: 32_768,
+                max_output_tokens: 4096,
+                supports_vision: false,
+                supports_tools: true,
+                supports_thinking: false,
+                input_cost: None,
+                output_cost: None,
+                hidden: false,
+                pinned: false,
+                source: "manual".into(),
+                last_seen_at: None,
+                sort_order: 0,
+                created_at: "now".into(),
+            },
+            provider: models::Provider {
+                id: "p1".into(),
+                owner_id: "local".into(),
+                name: "Test".into(),
+                api_style: "openai".into(),
+                base_url: "http://localhost:1".into(),
+                api_key: String::new(),
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            },
+        }
+    }
+
+    struct ScriptedStream;
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmProvider for ScriptedStream {
+        fn name(&self) -> &'static str {
+            "scripted"
+        }
+
+        async fn chat(
+            &self,
+            _req: &crate::llm::ChatRequest,
+        ) -> Result<crate::llm::ChatResponse, crate::llm::LlmError> {
+            unreachable!("this test streams");
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: &crate::llm::ChatRequest,
+        ) -> Result<crate::llm::TokenStream, crate::llm::LlmError> {
+            let events = vec![
+                Ok(crate::llm::StreamEvent::Text("hel".into())),
+                Ok(crate::llm::StreamEvent::Text("lo".into())),
+                Ok(crate::llm::StreamEvent::Done(crate::llm::StreamDone {
+                    tool_calls: Vec::new(),
+                    input_tokens: 5,
+                    output_tokens: 2,
+                })),
+            ];
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_tokens_to_the_sink_while_accumulating() {
+        let scripted = ScriptedStream;
+        let resolved = scripted_resolved();
+        let req = crate::llm::ChatRequest::new("test-model", vec![]);
+        let (tx, mut rx) = futures::channel::mpsc::unbounded();
+
+        let outcome = run_round(&scripted, &req, &resolved, Some(&tx)).await.unwrap();
+        assert_eq!(outcome.text, "hello");
+        assert_eq!((outcome.input_tokens, outcome.output_tokens), (5, 2));
+        assert!(outcome.tool_calls.is_empty());
+
+        // Both token events were forwarded before the round returned.
+        assert!(rx.try_next().unwrap().is_some());
+        assert!(rx.try_next().unwrap().is_some());
+        assert!(rx.try_next().is_err(), "only the two tokens were sent");
     }
 }

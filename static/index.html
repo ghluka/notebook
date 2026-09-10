@@ -178,6 +178,12 @@
   .turn.note { color:var(--faint); font-size:13px; }
   .turn.note.bad { color:var(--bad); }
   .thinking { color:var(--faint); font-size:13px; }
+  /* Tool progress while a streamed turn runs; cleared when it finishes, since
+     the meta line below the answer says the same thing. */
+  .tool-status { color:var(--faint); font-size:12px; padding:1px 0; }
+  /* A caret on the answer while tokens are still arriving. */
+  .turn.live .body::after { content:'▍'; color:var(--accent); animation:blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
   .empty-chat { color:var(--faint); text-align:center; margin-top:22vh; font-size:14px; }
 
   /* -------------------------------------------------------- composer */
@@ -2275,34 +2281,122 @@ async function runTurn(text) {
   const controller = new AbortController();
   composer.controller = controller;
   setBusy(true);
+  turn.classList.add('live');
+  const thinking = turn.querySelector('.thinking');
+  const bodyEl = turn.querySelector('.body');
+
+  // Tokens render as they arrive, throttled so a fast model does not re-lay
+  // out the page per word. Citations strip at the end, when they are known.
+  let pending = '';
+  let lastRender = 0, renderTimer = 0;
+  const nearBottom = () =>
+    $('#log').scrollHeight - $('#log').scrollTop - $('#log').clientHeight < 140;
+  const renderPending = () => {
+    lastRender = Date.now();
+    bodyEl.innerHTML = markdown(stripCitations(pending));
+    if (nearBottom()) turn.scrollIntoView({ block: 'end' });
+  };
+  const scheduleRender = () => {
+    const wait = 90 - (Date.now() - lastRender);
+    if (wait <= 0) renderPending();
+    else if (!renderTimer) {
+      renderTimer = setTimeout(() => { renderTimer = 0; renderPending(); }, wait);
+    }
+  };
+  const toolStatus = t => {
+    const s = document.createElement('div');
+    s.className = 'tool-status';
+    s.textContent = t;
+    turn.append(s);
+  };
+
+  const fail = e => {
+    stopTimer(turn);
+    turn.remove();
+    note(e.message, true);
+  };
 
   try {
-    const res = await api('/api/chat', {
+    const r = await fetch('/api/chat/stream', {
       method: 'POST',
-      signal: controller.signal,
-      json: {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
         message: text,
         conversation_id: state.conversationId,
         source_ids: [...state.attached],
         model_id: state.activeModel?.id || null,
-      },
+      }),
+      signal: controller.signal,
     });
-    state.conversationId = res.conversation_id;
-    localStorage.setItem(LAST_CHAT_KEY, res.conversation_id);
-    setUrl(res.conversation_id, { replace: true });
-    state.context = { used: res.context_used, window: res.context_window };
-    renderContext();
-    finishTurn(turn, res);
-    loadChats();
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      const e = new Error(body.error || r.statusText);
+      e.payload = body;
+      throw e;
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let finished = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (value) buf += decoder.decode(value, { stream: true });
+      for (;;) {
+        const end = buf.indexOf('\n\n');
+        if (end < 0) break;
+        const raw = buf.slice(0, end);
+        buf = buf.slice(end + 2);
+        let event = null;
+        const data = [];
+        for (const line of raw.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+          // Anything else is a keep-alive comment.
+        }
+        if (!data.length) continue;
+        let msg;
+        try {
+          msg = JSON.parse(data.join('\n'));
+        } catch {
+          continue;
+        }
+        if (event === 'token') {
+          pending += msg.t || '';
+          thinking?.remove();
+          scheduleRender();
+        } else if (event === 'tool') {
+          if (msg.t) toolStatus(msg.t);
+        } else if (event === 'done') {
+          finished = true;
+          state.conversationId = msg.conversation_id;
+          localStorage.setItem(LAST_CHAT_KEY, msg.conversation_id);
+          setUrl(msg.conversation_id, { replace: true });
+          state.context = { used: msg.context_used, window: msg.context_window };
+          renderContext();
+          turn.querySelectorAll('.tool-status').forEach(s => s.remove());
+          turn.classList.remove('live');
+          finishTurn(turn, msg);
+          loadChats();
+        } else if (event === 'error') {
+          const e = new Error(msg.error || 'stream failed');
+          e.payload = msg;
+          throw e;
+        }
+      }
+      if (done) break;
+    }
+    if (!finished) throw new Error('the stream ended before the answer arrived');
   } catch (e) {
     stopTimer(turn);
     if (e.name === 'AbortError') {
-      turn.querySelector('.thinking').textContent = 'Stopped';
+      const th = turn.querySelector('.thinking');
+      if (th) th.textContent = 'Stopped';
+      turn.classList.remove('live');
     } else {
-      turn.remove();
-      note(e.message, true);
+      fail(e);
     }
   } finally {
+    clearTimeout(renderTimer);
     composer.controller = null;
     setBusy(false);
     drainQueue();

@@ -247,3 +247,20 @@ impl ChatResponse {
         Message { role: Role::Assistant, content }
     }
 }
+
+/// One piece of a streamed answer. Text arrives as it is generated; `Done`
+/// closes the turn with the tool calls and usage alongside it. Providers only
+/// ever yield text through `Text`, never smuggled inside `Done`.
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    Text(String),
+    Done(StreamDone),
+}
+
+/// Everything a streamed turn accumulated besides its prose.
+#[derive(Debug, Clone, Default)]
+pub struct StreamDone {
+    pub tool_calls: Vec<ToolCall>,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}

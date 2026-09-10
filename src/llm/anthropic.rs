@@ -1,10 +1,11 @@
 //! Anthropic-style `/v1/messages`.
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde_json::{Value, json};
 
 use super::types::*;
-use super::{LlmError, LlmProvider};
+use super::{LlmError, LlmProvider, SseRecord, TokenStream, split_sse_records};
 
 const API_VERSION: &str = "2023-06-01";
 
@@ -179,5 +180,246 @@ impl LlmProvider for AnthropicProvider {
             },
             model: v["model"].as_str().unwrap_or(&req.model).to_string(),
         })
+    }
+
+    async fn chat_stream(&self, req: &ChatRequest) -> Result<TokenStream, LlmError> {
+        let mut body = Self::build_body(req)?;
+        body["stream"] = json!(true);
+
+        let resp = self
+            .http
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", API_VERSION)
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let raw = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api { status: status.as_u16(), body: raw, retry_after: None });
+        }
+
+        // Same shape as the OpenAI pump: the handshake above stays retryable,
+        // everything below ends the turn, and dropping the stream stops the
+        // task with its provider connection.
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        tokio::spawn(async move {
+            let mut bytes = resp.bytes_stream();
+            let mut buf = String::new();
+            let mut state = AnthropicStreamState::default();
+            loop {
+                match bytes.next().await {
+                    Some(Ok(chunk)) => buf.push_str(&String::from_utf8_lossy(&chunk)),
+                    Some(Err(e)) => {
+                        let _ = tx.unbounded_send(Err(LlmError::Http(e)));
+                        return;
+                    }
+                    None => break,
+                }
+                for rec in split_sse_records(&mut buf) {
+                    if pump_anthropic_record(&tx, &mut state, &rec) {
+                        return;
+                    }
+                }
+            }
+            // A well-formed stream closes with message_stop; anything else
+            // lost data on the wire.
+            buf.push_str("\n\n");
+            for rec in split_sse_records(&mut buf) {
+                if pump_anthropic_record(&tx, &mut state, &rec) {
+                    return;
+                }
+            }
+            let _ = tx.unbounded_send(Err(LlmError::Request(
+                "the stream ended before message_stop".into(),
+            )));
+        });
+        Ok(Box::pin(rx))
+    }
+}
+
+/// Forwards one record's event, if any. True when the turn is over.
+fn pump_anthropic_record(
+    tx: &futures::channel::mpsc::UnboundedSender<Result<StreamEvent, LlmError>>,
+    state: &mut AnthropicStreamState,
+    rec: &SseRecord,
+) -> bool {
+    match feed_anthropic_record(state, rec) {
+        Ok(Some(ev)) => {
+            let done = matches!(ev, StreamEvent::Done(_));
+            let _ = tx.unbounded_send(Ok(ev));
+            done
+        }
+        Ok(None) => false,
+        Err(e) => {
+            let _ = tx.unbounded_send(Err(e));
+            true
+        }
+    }
+}
+
+/// Tool input fragments in flight, keyed by content block index.
+#[derive(Debug, Default)]
+struct AnthropicStreamState {
+    tools: std::collections::BTreeMap<u64, AnthropicToolBuilder>,
+    input_tokens: u32,
+    output_tokens: u32,
+}
+
+#[derive(Debug, Default)]
+struct AnthropicToolBuilder {
+    id: String,
+    name: String,
+    input: String,
+}
+
+/// Fold one SSE record into text, tool fragments and usage. `message_stop`
+/// closes the turn with everything accumulated alongside it. Anything else
+/// (pings, block opens and closes) yields nothing on its own.
+fn feed_anthropic_record(
+    state: &mut AnthropicStreamState,
+    rec: &SseRecord,
+) -> Result<Option<StreamEvent>, LlmError> {
+    let v: Value = serde_json::from_str(&rec.data)?;
+    match rec.event.as_deref() {
+        Some("message_start") => {
+            state.input_tokens = v["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
+            Ok(None)
+        }
+        Some("content_block_start") => {
+            let block = &v["content_block"];
+            if block["type"].as_str() == Some("tool_use") {
+                let index = v["index"].as_u64().unwrap_or(0);
+                state.tools.insert(index, AnthropicToolBuilder {
+                    id: block["id"].as_str().unwrap_or_default().to_string(),
+                    name: block["name"].as_str().unwrap_or_default().to_string(),
+                    input: String::new(),
+                });
+            }
+            Ok(None)
+        }
+        Some("content_block_delta") => {
+            let delta = &v["delta"];
+            match delta["type"].as_str() {
+                Some("text_delta") => match delta["text"].as_str() {
+                    Some(t) if !t.is_empty() => Ok(Some(StreamEvent::Text(t.to_string()))),
+                    _ => Ok(None),
+                },
+                Some("input_json_delta") => {
+                    let index = v["index"].as_u64().unwrap_or(0);
+                    if let Some(part) = delta["partial_json"].as_str() {
+                        state.tools.entry(index).or_default().input.push_str(part);
+                    }
+                    Ok(None)
+                }
+                _ => Ok(None),
+            }
+        }
+        Some("message_delta") => {
+            state.output_tokens =
+                v["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+            Ok(None)
+        }
+        Some("message_stop") => {
+            let tool_calls = state
+                .tools
+                .values()
+                .map(|b| ToolCall {
+                    id: b.id.clone(),
+                    name: b.name.clone(),
+                    // Same leniency as chat(): broken JSON becomes Null.
+                    arguments: serde_json::from_str(&b.input).unwrap_or(Value::Null),
+                })
+                .collect();
+            Ok(Some(StreamEvent::Done(StreamDone {
+                tool_calls,
+                input_tokens: state.input_tokens,
+                output_tokens: state.output_tokens,
+            })))
+        }
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(event: &str, data: &str) -> SseRecord {
+        SseRecord { event: Some(event.into()), data: data.into() }
+    }
+
+    #[test]
+    fn streams_text_and_usage() {
+        let mut state = AnthropicStreamState::default();
+        let start = feed_anthropic_record(
+            &mut state,
+            &record("message_start", r#"{"message":{"usage":{"input_tokens":12}}}"#),
+        )
+        .unwrap();
+        assert!(start.is_none());
+
+        let text = feed_anthropic_record(
+            &mut state,
+            &record(
+                "content_block_delta",
+                r#"{"index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+            ),
+        )
+        .unwrap();
+        assert!(matches!(text, Some(StreamEvent::Text(ref t)) if t == "hi"));
+
+        let delta = feed_anthropic_record(
+            &mut state,
+            &record("message_delta", r#"{"usage":{"output_tokens":4}}"#),
+        )
+        .unwrap();
+        assert!(delta.is_none());
+
+        match feed_anthropic_record(&mut state, &record("message_stop", "{}")).unwrap() {
+            Some(StreamEvent::Done(d)) => {
+                assert!(d.tool_calls.is_empty());
+                assert_eq!((d.input_tokens, d.output_tokens), (12, 4));
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assembles_fragmented_tool_input() {
+        let mut state = AnthropicStreamState::default();
+        for (event, data) in [
+            (
+                "content_block_start",
+                r#"{"index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_source"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"index":1,"delta":{"type":"input_json_delta","partial_json":"{\"title\":"}}"#,
+            ),
+            (
+                "content_block_delta",
+                r#"{"index":1,"delta":{"type":"input_json_delta","partial_json":"\"fuchs.pdf\"}"}}"#,
+            ),
+        ] {
+            assert!(feed_anthropic_record(&mut state, &record(event, data)).unwrap().is_none());
+        }
+        match feed_anthropic_record(&mut state, &record("message_stop", "{}")).unwrap() {
+            Some(StreamEvent::Done(d)) => {
+                assert_eq!(d.tool_calls.len(), 1);
+                assert_eq!(d.tool_calls[0].name, "read_source");
+                assert_eq!(d.tool_calls[0].arguments["title"], "fuchs.pdf");
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ignores_pings_and_unknown_blocks() {
+        let mut state = AnthropicStreamState::default();
+        let ping = SseRecord { event: Some("ping".into()), data: r#"{"type":"ping"}"#.into() };
+        assert!(feed_anthropic_record(&mut state, &ping).unwrap().is_none());
     }
 }
