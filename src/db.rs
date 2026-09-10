@@ -827,10 +827,11 @@ pub async fn conversation_messages(db: &Db, id: &str) -> sqlx::Result<Vec<Stored
     .await
 }
 
-/// Retrying an answer means unasking the question: the assistant turn, the
-/// question that produced it and everything said after it all go, and the
-/// question comes back so the caller can ask it again. Returns None when the
-/// message is not there, or when nothing before it was a question.
+/// Unasking a question: the question, whatever it produced and everything said
+/// after it all go, and the question comes back so the caller can decide what
+/// to do with it. Point at an answer and the question behind it is the one that
+/// goes; point at a question and it is that one. Returns None when the message
+/// is not there, or when nothing at or before it was a question.
 pub async fn rewind_to_question(
     db: &Db,
     conversation_id: &str,
@@ -840,7 +841,7 @@ pub async fn rewind_to_question(
     let Some(at) = messages.iter().position(|m| m.id == message_id) else {
         return Ok(None);
     };
-    let Some(question) = messages[..at].iter().rposition(|m| m.role == "user") else {
+    let Some(question) = messages[..=at].iter().rposition(|m| m.role == "user") else {
         return Ok(None);
     };
 
@@ -906,6 +907,23 @@ mod rewind_tests {
         let left = conversation_messages(&db, &c).await.expect("messages");
         let texts: Vec<&str> = left.iter().map(|m| m.content.as_str()).collect();
         assert_eq!(texts, vec!["first question", "first answer"]);
+    }
+
+    #[tokio::test]
+    async fn rewinding_at_a_question_takes_that_question() {
+        let (db, c) = scratch().await;
+        say(&db, &c, "user", "first question").await;
+        say(&db, &c, "assistant", "first answer").await;
+        let target = say(&db, &c, "user", "second question").await;
+        say(&db, &c, "assistant", "second answer").await;
+
+        let (question, removed) =
+            rewind_to_question(&db, &c, &target).await.expect("query").expect("rewound");
+        assert_eq!(question, "second question");
+        assert_eq!(removed, 2);
+
+        let left = conversation_messages(&db, &c).await.expect("messages");
+        assert_eq!(left.len(), 2);
     }
 
     #[tokio::test]

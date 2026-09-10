@@ -74,26 +74,28 @@ pub async fn delete(
 }
 
 #[derive(Deserialize)]
-pub struct RetryBody {
+pub struct RewindBody {
     pub message_id: String,
 }
 
-/// `POST /api/conversations/{id}/retry` takes an answer back out of the
-/// transcript along with the question behind it, and hands the question back.
-/// The client then asks it again, so the model never sees its own first attempt.
-/// Everything said after that point goes too: a conversation is a line, not a
-/// tree, and leaving orphaned turns behind would make the history a lie.
-pub async fn retry(
+/// `POST /api/conversations/{id}/rewind` takes a question back out of the
+/// transcript and hands it back to the caller, which then asks it again as it
+/// was (retry), asks a changed version of it (edit), or lets it go (undo). The
+/// message id can be either end of the exchange: an answer rewinds the question
+/// behind it, a question rewinds itself. Everything said after that point goes
+/// too, since a conversation is a line, not a tree, and leaving orphaned turns
+/// behind would make the history a lie.
+pub async fn rewind(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<RetryBody>,
+    Json(body): Json<RewindBody>,
 ) -> AppResult<Json<Value>> {
     let conversation = load(&state, &id).await?;
     let rewound = db::rewind_to_question(&state.db, &conversation.id, &body.message_id).await?;
 
     let Some((message, removed)) = rewound else {
         return Err(AppError::BadRequest(
-            "there is no question behind that answer to ask again".into(),
+            "there is no question at or before that message to take back".into(),
         ));
     };
 

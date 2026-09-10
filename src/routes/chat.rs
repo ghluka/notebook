@@ -102,9 +102,10 @@ pub struct Citation {
 #[derive(Serialize)]
 pub struct ChatResponseBody {
     pub conversation_id: String,
-    /// The stored assistant turn, so the client can ask for it to be retried
-    /// without reloading the conversation first.
+    /// The stored turns, so the client can offer to retry, edit or take back
+    /// what just happened without reloading the conversation first.
     pub message_id: String,
+    pub user_message_id: String,
     pub answer: String,
     pub citations: Vec<Citation>,
     pub model: String,
@@ -751,7 +752,8 @@ async fn finish_turn(
         }
     };
 
-    db::append_message(&state.db, &conversation_id, "user", message, None, None, None).await?;
+    let user_message_id =
+        db::append_message(&state.db, &conversation_id, "user", message, None, None, None).await?;
     let message_id = db::append_message(
         &state.db,
         &conversation_id,
@@ -766,6 +768,7 @@ async fn finish_turn(
     Ok(ChatResponseBody {
         conversation_id,
         message_id,
+        user_message_id,
         answer: text.to_string(),
         citations,
         model: prep.resolved.model.model_id.clone(),

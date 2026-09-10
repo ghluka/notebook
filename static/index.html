@@ -134,9 +134,16 @@
   #log { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:28px 0 8px; }
   .thread { width:min(760px, 100%); margin:0 auto; padding:0 24px; }
   .turn { margin-bottom:26px; }
-  .turn.user { display:flex; justify-content:flex-end; }
+  /* A column so the actions can sit under the bubble, both against the right. */
+  .turn.user { display:flex; flex-direction:column; align-items:flex-end; }
   .turn.user .bubble { background:var(--raised); border-radius:14px; padding:9px 15px;
                        max-width:78%; white-space:pre-wrap; }
+  .turn.user .msg-actions { margin-top:3px; font-size:12px; }
+  /* Editing a question in place: the composer, where the question already is. */
+  .turn.user .editor { width:100%; background:var(--raised); border:1px solid var(--line);
+                       border-radius:14px; padding:11px 14px 9px; }
+  .turn.user .editor textarea { max-height:320px; font:15px/1.5 var(--sans); }
+  .editor-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }
   .turn.assistant .body { font:16px/1.7 var(--serif); color:var(--fg); }
   .turn.assistant .body p { margin:0 0 14px; }
   .turn.assistant .body h1, .turn.assistant .body h2, .turn.assistant .body h3 {
@@ -176,9 +183,12 @@
   /* Copy, retry and when it was said. They live on the meta line and only
      show while the answer is under the pointer, so a finished transcript stays
      quiet. Opacity rather than display, so revealing them moves nothing. */
-  .msg-actions { display:flex; align-items:center; gap:2px; margin-left:auto;
+  .msg-actions { display:flex; align-items:center; gap:2px;
                  opacity:0; transition:opacity .12s ease; }
-  .turn.assistant:hover .msg-actions, .msg-actions:focus-within { opacity:1; }
+  /* On an answer the bar shares the meta line, so it takes the far end of it.
+     On a question the column already puts it against the right. */
+  .turn.assistant .msg-actions { margin-left:auto; }
+  .turn:hover .msg-actions, .msg-actions:focus-within { opacity:1; }
   .msg-actions button { background:transparent; border:0; color:var(--faint);
                         padding:5px; border-radius:7px; display:flex;
                         align-items:center; justify-content:center; }
@@ -2068,7 +2078,7 @@ function emptyState() {
 }
 function clearEmpty() { document.getElementById('emptyChat')?.remove(); }
 
-function userTurn(text) {
+function userTurn(text, messageId) {
   clearEmpty();
   const el = document.createElement('div');
   el.className = 'turn user';
@@ -2076,6 +2086,7 @@ function userTurn(text) {
   bubble.className = 'bubble';
   bubble.textContent = text;
   el.append(bubble);
+  if (messageId) attachUserActions(el, { message_id: messageId, text });
   $('#thread').append(el);
   el.scrollIntoView({ block: 'end' });
   return el;
@@ -2141,6 +2152,15 @@ const ACTION_ICON = {
          ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' +
          '<path d="M13.3 8a5.3 5.3 0 1 1-1.63-3.82"/>' +
          '<path d="M13.5 2.4v3.3h-3.3"/></svg>',
+  edit: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"' +
+        ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M9.9 3.3l2.8 2.8"/>' +
+        '<path d="M3.9 13.2l-1.7.5.5-1.7 7.5-7.5a1.1 1.1 0 0 1 1.6 0l.9.9' +
+        'a1.1 1.1 0 0 1 0 1.6z"/></svg>',
+  undo: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"' +
+        ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' +
+        '<path d="M3 6.3h6.3a3.4 3.4 0 1 1 0 6.9H6.2"/>' +
+        '<path d="M5.6 3.4L2.7 6.3l2.9 2.9"/></svg>',
 };
 
 function actionButton(icon, label) {
@@ -2227,6 +2247,145 @@ function turnActions(el, res) {
   return box;
 }
 
+/* Copy the question, ask a changed version of it, or take it back. The bar
+   only appears once the turn is stored, which is when it can be acted on. */
+function attachUserActions(el, message) {
+  if (!message.message_id || el.querySelector('.msg-actions')) return;
+  const box = document.createElement('div');
+  box.className = 'msg-actions';
+
+  const copy = actionButton('copy', 'Copy');
+  copy.onclick = async () => {
+    const ok = await copyText(message.text);
+    copy.innerHTML = ACTION_ICON[ok ? 'check' : 'copy'];
+    copy.classList.toggle('done', ok);
+    copy.title = ok ? 'Copied' : 'Could not copy';
+    setTimeout(() => {
+      copy.innerHTML = ACTION_ICON.copy;
+      copy.classList.remove('done');
+      copy.title = 'Copy';
+    }, 1500);
+  };
+
+  const edit = actionButton('edit', 'Edit and ask again');
+  edit.onclick = () => editTurn(el, message);
+
+  const undo = actionButton('undo', 'Take this question back');
+  undo.onclick = () => undoTurn(el, message);
+
+  box.append(copy, edit, undo);
+  el.append(box);
+}
+
+/* Editing happens where the question is, not in the composer at the bottom:
+   the bubble becomes a box with the text in it, Enter sends, Escape cancels. */
+function editTurn(el, message) {
+  if (el.querySelector('.editor')) return;
+  const bubble = el.querySelector('.bubble');
+  const bar = el.querySelector('.msg-actions');
+
+  const box = document.createElement('div');
+  box.className = 'editor';
+  const area = document.createElement('textarea');
+  area.value = message.text;
+  const row = document.createElement('div');
+  row.className = 'editor-actions';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn ghost';
+  cancel.textContent = 'Cancel';
+  const send = document.createElement('button');
+  send.className = 'btn';
+  send.textContent = 'Send';
+  row.append(cancel, send);
+  box.append(area, row);
+
+  const close = () => {
+    box.remove();
+    bubble.hidden = false;
+    if (bar) bar.hidden = false;
+  };
+  bubble.hidden = true;
+  if (bar) bar.hidden = true;
+  bubble.after(box);
+
+  const grow = () => {
+    area.style.height = 'auto';
+    area.style.height = Math.min(area.scrollHeight, 320) + 'px';
+  };
+  area.addEventListener('input', grow);
+  area.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send.click(); }
+  });
+  cancel.onclick = close;
+  send.onclick = async () => {
+    const text = area.value.trim();
+    if (!text) return area.focus();
+    if (text === message.text) return close();
+    if (!await unask(el, message, 'Send the edit?')) return area.focus();
+    runTurn(text);
+  };
+
+  grow();
+  area.focus();
+  area.setSelectionRange(area.value.length, area.value.length);
+}
+
+/* Taking a question back leaves no answer to it, so the text goes back in the
+   composer: an undo should hand you what you had, not swallow it. */
+async function undoTurn(el, message) {
+  if (!await unask(el, message, 'Take this question back?')) return;
+  if (!q.value.trim()) {
+    q.value = message.text;
+    q.dispatchEvent(new Event('input'));
+    q.focus();
+  }
+}
+
+/* What edit, undo and retry all do first: take the exchange out of the stored
+   conversation and off the thread. The answer to this question goes without
+   asking, since replacing it is the point; anything said after it is a
+   different matter and gets a confirmation naming how much. */
+async function unask(el, message, title) {
+  if (composer.busy) {
+    note('Wait for the current answer to finish first.');
+    return false;
+  }
+
+  let following = 0;
+  let n = el.nextElementSibling;
+  if (n && n.classList.contains('assistant')) n = n.nextElementSibling;
+  for (; n; n = n.nextElementSibling) if (n.classList.contains('turn')) following++;
+
+  if (following) {
+    const ok = await ask(title,
+      'The ' + following + (following === 1 ? ' turn' : ' turns') +
+      ' after it will be removed as well.', 'Continue');
+    if (!ok) return false;
+  }
+
+  try {
+    await api('/api/conversations/' + state.conversationId + '/rewind',
+              { method: 'POST', json: { message_id: message.message_id } });
+  } catch (e) {
+    note(e.message, true);
+    return false;
+  }
+  removeFrom(el);
+  loadChats();
+  return true;
+}
+
+/* This turn and everything after it comes off the thread. */
+function removeFrom(el) {
+  for (let n = el; n; ) {
+    const next = n.nextElementSibling;
+    n.remove();
+    n = next;
+  }
+  emptyState();
+}
+
 /* The question behind an answer, which is the turn the retry replaces. */
 function priorQuestion(el) {
   let node = el.previousElementSibling;
@@ -2251,7 +2410,7 @@ async function retryTurn(el, messageId) {
 
   let res;
   try {
-    res = await api('/api/conversations/' + state.conversationId + '/retry',
+    res = await api('/api/conversations/' + state.conversationId + '/rewind',
                     { method: 'POST', json: { message_id: messageId } });
   } catch (e) {
     return note(e.message, true);
@@ -2259,11 +2418,7 @@ async function retryTurn(el, messageId) {
 
   // The question goes back on the thread with a fresh answer, so the old pair
   // and anything after it comes off first.
-  for (let n = priorQuestion(el) || el; n; ) {
-    const next = n.nextElementSibling;
-    n.remove();
-    n = next;
-  }
+  removeFrom(priorQuestion(el) || el);
   loadChats();
   runTurn(res.message);
 }
@@ -2429,7 +2584,7 @@ function drainQueue() {
 }
 
 async function runTurn(text) {
-  userTurn(text);
+  const asked = userTurn(text);
   const turn = assistantTurn();
   const controller = new AbortController();
   composer.controller = controller;
@@ -2528,6 +2683,7 @@ async function runTurn(text) {
           renderContext();
           turn.querySelectorAll('.tool-status').forEach(s => s.remove());
           turn.classList.remove('live');
+          attachUserActions(asked, { message_id: msg.user_message_id, text });
           finishTurn(turn, msg);
           loadChats();
         } else if (event === 'error') {
@@ -2710,7 +2866,7 @@ async function openConversation(id, { fromHistory = false } = {}) {
       dividerDrawn = true;
     }
     if (m.role === 'user') {
-      userTurn(m.content);
+      userTurn(m.content, m.compacted ? null : m.id);
     } else if (m.role === 'assistant') {
       const el = assistantTurn();
       stopTimer(el);
