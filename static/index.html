@@ -74,11 +74,19 @@
   .node { display:flex; align-items:center; gap:6px; height:24px; padding:0 8px 0 0;
           font-size:13px; color:var(--dim); white-space:nowrap; cursor:default; }
   .node:hover { background:var(--hover); }
+  /* Selected rows are the retrieval scope, so the whole selection is lit, and
+     the row you clicked last carries the brighter focus. */
+  .node.scoped { background:#33302c; color:var(--fg); }
+  .node.scoped:hover { background:#3a3733; }
   .node.sel { background:#3b3a37; color:var(--fg); }
-  .node.scoped { color:var(--fg); }
-  .node.scoped .name::after { content:"·"; color:var(--accent); margin-left:6px;
-                              font-weight:700; }
   .node.drop { outline:1px solid var(--accent); outline-offset:-1px; }
+  /* What follows the cursor while dragging. Off screen until the browser
+     snapshots it, then thrown away. */
+  .drag-ghost { position:fixed; top:-1000px; left:-1000px; display:flex;
+                align-items:center; gap:6px; padding:5px 10px; font-size:13px;
+                color:var(--fg); background:var(--raised);
+                border:1px solid var(--accent); border-radius:7px;
+                white-space:nowrap; box-shadow:0 6px 18px rgba(0,0,0,.45); }
   .node .twist { width:14px; flex:none; display:flex; justify-content:center;
                  color:var(--faint); }
   .node .ico { width:16px; height:16px; flex:none; }
@@ -86,10 +94,22 @@
   .node .state { margin-left:auto; font-size:11px; color:var(--faint); flex:none; }
   .node .state.failed { color:var(--bad); }
   .node .state.busy { color:var(--accent); }
+  /* Stored but not yet read: the row is there, just not usable yet. */
+  .node.working .name { color:var(--faint); }
+  .node .pages { font-size:11px; color:var(--faint); flex:none;
+                 font-variant-numeric:tabular-nums; margin-left:auto; }
+  .node .pages + .spin { margin-left:6px; }
+  .spin { width:11px; height:11px; flex:none; margin-left:auto;
+          border:1.5px solid #46443f; border-top-color:var(--accent);
+          border-radius:50%; animation:spin .8s linear infinite; }
+  .spin.queued { animation-duration:2.4s; opacity:.6; }
+  @keyframes spin { to { transform:rotate(360deg); } }
   .node input { background:var(--bg); border:1px solid var(--accent); color:var(--fg);
                 font:inherit; border-radius:4px; padding:0 4px; width:100%; outline:none; }
   /* Fixed height, because the scope button is taller than the line of text and
      the bar would otherwise grow the moment a file goes into scope. */
+  .rail-foot #treeStatus { flex:1; min-width:0; overflow:hidden;
+                          text-overflow:ellipsis; white-space:nowrap; }
   .rail-foot { height:40px; flex:none; padding:0 10px;
                border-top:1px solid var(--line);
                font-size:12px; color:var(--faint); display:flex; gap:8px;
@@ -98,6 +118,13 @@
                       border-radius:6px; padding:3px 8px; font-size:12px;
                       line-height:1.35; color:var(--dim); }
   .rail-foot button:hover { color:var(--fg); border-color:#4d4b47; }
+  /* Progress sits along the top edge of the footer, so the bar appearing does
+     not move anything. */
+  .rail-foot { position:relative; }
+  .rail-progress { position:absolute; top:-1px; left:0; right:0; height:2px;
+                   background:transparent; }
+  .rail-progress i { display:block; height:100%; width:0; background:var(--accent);
+                     transition:width .3s ease; }
 
   /* ------------------------------------------------------------ chat */
   /* min-height:0 on both, or the grid item and the flex child size themselves
@@ -208,8 +235,11 @@
                 transform:rotate(-90deg); transform-origin:50% 50%; }
 
   /* --------------------------------------------------------- viewer */
+  /* min-height:0 on both, or a long rendition sizes the pane by its content,
+     stretching the whole grid and pushing the sources rail out of view,
+     instead of scrolling inside the pane. */
   .viewer { background:var(--panel); border-left:1px solid var(--line);
-            display:flex; flex-direction:column; min-width:0; }
+            display:flex; flex-direction:column; min-width:0; min-height:0; }
   /* A class with `display` outranks the browser's [hidden] rule, so say it here
      or the pane keeps its grid slot and wraps under the explorer. */
   .viewer[hidden] { display:none; }
@@ -221,7 +251,7 @@
   .viewer .tabs button { background:transparent; border:0; color:var(--faint);
                          font-size:12px; padding:5px 9px; border-radius:7px; }
   .viewer .tabs button.on { background:var(--raised); color:var(--fg); }
-  .viewer .body { flex:1; overflow:auto; padding:12px 14px; }
+  .viewer .body { flex:1; min-height:0; overflow:auto; padding:12px 14px; }
   .viewer .body pre { white-space:pre-wrap; word-break:break-word;
                       font:13px/1.65 var(--mono); color:var(--dim); margin:0; }
   .viewer .body img { max-width:100%; border-radius:8px; }
@@ -367,6 +397,7 @@
     <div class="tree" id="tree"></div>
   </div>
   <div class="rail-foot">
+    <div class="rail-progress"><i id="railProgress"></i></div>
     <span id="treeStatus">0 files</span>
     <span class="spacer" style="flex:1"></span>
     <button id="clearScope">Clear scope</button>
@@ -528,6 +559,8 @@ const state = {
   activeModel: null, context: { used: 0, window: 0 },
   models: [], providers: [], roles: {}, editingProvider: null, dropTarget: null,
   chats: [], cmdIndex: 0,
+  uploading: 0, analysisTotal: 0, analysisTimer: null,
+  rowOrder: [], anchorId: null, treeSignature: '', dragScroll: 0, dragScrollTimer: null,
 };
 
 async function api(path, opts = {}) {
@@ -538,7 +571,14 @@ async function api(path, opts = {}) {
   }
   const r = await fetch(path, opts);
   const body = await r.json().catch(() => ({ error: r.statusText }));
-  if (!r.ok) throw new Error(body.error || r.statusText);
+  if (!r.ok) {
+    const error = new Error(body.error || r.statusText);
+    // The server labels failures it expects the client to act on, such as
+    // `kind: "rate_limited"`, which carries the model that ran out of capacity.
+    error.payload = body;
+    error.status = r.status;
+    throw error;
+  }
   return body;
 }
 
@@ -579,31 +619,186 @@ function iconSvg(kind, filename) {
 /* ---------------------------------------------------------- explorer */
 async function loadTree() {
   const data = await api('/api/sources');
+  const previous = new Map(state.sources.map(s => [s.id, s.status]));
   state.sources = data.sources;
   state.folders = data.folders;
   renderTree();
+
+  // Anything that just finished is worth saying out loud, since the file may
+  // have been queued minutes ago.
+  for (const s of state.sources) {
+    const before = previous.get(s.id);
+    if (!before || before === s.status) continue;
+    if (s.status === 'failed') {
+      const detail = s.error_detail ? JSON.parse(s.error_detail) : {};
+      if (detail.kind === 'rate_limited') {
+        analyzerFailed(s, { message: s.error, payload: detail });
+      } else {
+        note(`${s.title}: ${s.error}`, true);
+      }
+    }
+  }
+
+  watchAnalysis();
+  return data;
 }
 
+/* Poll only while the server has work in flight. Analysis outlives the request
+   that started it, so this is also what picks the state back up after a
+   refresh or a restart. */
+function watchAnalysis() {
+  const working = state.sources.filter(
+    s => s.status === 'pending' || s.status === 'analyzing').length;
+  if (working > (state.analysisTotal || 0)) state.analysisTotal = working;
+
+  clearTimeout(state.analysisTimer);
+  if (!working) return;
+  state.analysisTimer = setTimeout(() => loadTree().catch(() => {}), 1500);
+}
+
+/* Rebuilding every row on each poll restarted every spinner mid turn, which
+   is what made the animation look like it skipped. So the shape of the tree is
+   computed first, and when it has not changed the existing rows are patched in
+   place and their animations keep running. */
 function renderTree() {
-  const tree = $('#tree');
-  tree.innerHTML = '';
-  drawLevel(null, 0, tree);
+  const rows = [];
+  collectRows(null, 0, rows);
+  state.rowOrder = rows.filter(r => r.kind === 'source').map(r => r.id);
 
-  const scoped = state.scope.size;
-  $('#treeStatus').textContent = `${state.sources.length} file${state.sources.length === 1 ? '' : 's'}` +
-    (scoped ? `, ${scoped} in scope` : '');
-  $('#clearScope').hidden = !scoped;
+  const tree = $('#tree');
+  const signature = rows.map(r => `${r.kind}:${r.id}:${r.depth}`).join('|');
+
+  if (signature === state.treeSignature && tree.children.length === rows.length) {
+    rows.forEach((row, i) => patchNode(tree.children[i], row));
+  } else {
+    state.treeSignature = signature;
+    tree.innerHTML = '';
+    for (const row of rows) {
+      tree.append(row.kind === 'folder' ? folderNode(row) : sourceNode(row));
+    }
+  }
+  renderTreeStatus();
 }
 
-function drawLevel(parentId, depth, into) {
-  for (const f of state.folders.filter(f => (f.parent_id || null) === parentId)) {
-    const open = state.open.has(f.id);
-    into.append(folderNode(f, depth, open));
-    if (open) drawLevel(f.id, depth + 1, into);
+function collectRows(parentId, depth, out) {
+  for (const folder of state.folders.filter(f => (f.parent_id || null) === parentId)) {
+    const open = state.open.has(folder.id);
+    out.push({ kind: 'folder', id: folder.id, depth, folder, open });
+    if (open) collectRows(folder.id, depth + 1, out);
   }
-  for (const s of state.sources.filter(s => (s.folder_id || null) === parentId)) {
-    into.append(sourceNode(s, depth));
+  for (const source of state.sources.filter(s => (s.folder_id || null) === parentId)) {
+    out.push({ kind: 'source', id: source.id, depth, source });
   }
+}
+
+/* Update one existing row without replacing it. Only the status block is
+   rebuilt, and only when the status actually changed. */
+function patchNode(el, row) {
+  if (!el) return;
+  if (row.kind === 'folder') {
+    el.querySelector('.twist').innerHTML = row.open ? '&#9662;' : '&#9656;';
+    el.classList.toggle('sel', state.selectedNode === 'f:' + row.id);
+    return;
+  }
+
+  const source = row.source;
+  el.classList.toggle('scoped', state.scope.has(source.id));
+  el.classList.toggle('sel', state.selectedNode === 's:' + source.id);
+  el.classList.toggle('working', isWorking(source));
+
+  if (el.dataset.status !== source.status) {
+    el.dataset.status = source.status;
+    el.querySelectorAll('.trail').forEach(t => t.remove());
+    el.append(statusMark(source));
+    el.title = nodeTitle(source);
+    el.dataset.progress = source.progress || '';
+    return;
+  }
+  // Only the count changes while a long file is read, so the spinner element
+  // stays put and its rotation carries on.
+  if ((source.progress || '') !== el.dataset.progress) {
+    el.dataset.progress = source.progress || '';
+    const pages = el.querySelector('.pages');
+    if (source.progress && pages) {
+      pages.textContent = source.progress;
+    } else {
+      el.querySelectorAll('.trail').forEach(t => t.remove());
+      el.append(statusMark(source));
+    }
+  }
+}
+
+const isWorking = s => s.status === 'pending' || s.status === 'analyzing';
+
+/* What sits at the right of a row: a spinner while it is working, with the
+   page count for a long file, or the word failed. Returns a fragment so the
+   count and the spinner can be separate elements. */
+function statusMark(source) {
+  const frag = document.createDocumentFragment();
+  if (isWorking(source)) {
+    if (source.progress) {
+      const pages = document.createElement('span');
+      pages.className = 'trail pages';
+      pages.textContent = source.progress;
+      frag.append(pages);
+    }
+    const spin = document.createElement('span');
+    spin.className = 'trail spin' + (source.status === 'pending' ? ' queued' : '');
+    frag.append(spin);
+  } else if (source.status === 'failed') {
+    const failed = document.createElement('span');
+    failed.className = 'trail state failed';
+    failed.textContent = 'failed';
+    frag.append(failed);
+  }
+  return frag;
+}
+
+function nodeTitle(source) {
+  if (source.error) return source.error;
+  if (source.status === 'pending') return 'stored, waiting for the analyzer';
+  if (source.status === 'analyzing') {
+    return source.progress ? `the analyzer is reading this, page ${source.progress}`
+                           : 'the analyzer is reading this';
+  }
+  return `${source.kind}, ${bytes(source.byte_size)}`;
+}
+
+/* The footer carries what the library is doing and what is selected, together.
+   Analysis can run for an hour on a long file, and losing the scope readout and
+   the clear button for that whole time is no good. */
+function renderTreeStatus() {
+  const working = state.sources.filter(s => s.status === 'pending' || s.status === 'analyzing');
+  const bar = $('#railProgress');
+  const scoped = state.scope.size;
+
+  let lead;
+  if (state.uploading) {
+    lead = `storing ${state.uploading} file(s)`;
+    bar.style.width = '15%';
+  } else if (working.length) {
+    const total = state.analysisTotal || working.length;
+    const done = Math.max(0, total - working.length);
+    const single = working.length === 1 ? working[0] : null;
+    // One long file reports its pages, a queue reports its position.
+    lead = total > 1 ? `analyzing ${done + 1} of ${total}`
+         : single?.progress ? `analyzing ${single.progress}`
+         : 'analyzing 1 file';
+    bar.style.width = Math.round(((done + 0.3) / total) * 100) + '%';
+  } else {
+    state.analysisTotal = 0;
+    bar.style.width = '0';
+    lead = `${state.sources.length} file${state.sources.length === 1 ? '' : 's'}`;
+  }
+
+  // The count rides on the button rather than the status line, which is the
+  // first thing to be trimmed when a long progress string and a button share
+  // 264px.
+  $('#treeStatus').textContent = lead;
+  $('#treeStatus').title = scoped ? `${lead}, ${scoped} in scope` : lead;
+  $('#clearScope').textContent = `Clear ${scoped}`;
+  $('#clearScope').title = `${scoped} file${scoped === 1 ? '' : 's'} in scope for the next question`;
+  $('#clearScope').hidden = !scoped;
 }
 
 function baseNode(depth) {
@@ -613,7 +808,8 @@ function baseNode(depth) {
   return el;
 }
 
-function folderNode(folder, depth, open) {
+function folderNode(row) {
+  const { folder, depth, open } = row;
   const el = baseNode(depth);
   el.dataset.folderId = folder.id;
   el.innerHTML =
@@ -629,57 +825,148 @@ function folderNode(folder, depth, open) {
   };
   el.oncontextmenu = e => { e.preventDefault(); folderMenu(e, folder); };
 
-  el.ondragover = e => { e.preventDefault(); el.classList.add('drop'); state.dropTarget = folder.id; };
-  el.ondragleave = () => { el.classList.remove('drop'); };
-  el.ondrop = e => { e.preventDefault(); el.classList.remove('drop'); drop(folder.id); };
+  el.ondragover = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.add('drop');
+    dragScrollFrom(e);
+  };
+  el.ondragleave = () => el.classList.remove('drop');
+  el.ondrop = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    el.classList.remove('drop');
+    drop(folder.id);
+  };
   return el;
 }
 
-function sourceNode(source, depth) {
+function sourceNode(row) {
+  const { source, depth } = row;
   const el = baseNode(depth);
   el.dataset.sourceId = source.id;
+  el.dataset.status = source.status;
   el.draggable = true;
-  const stateClass = source.status === 'failed' ? 'failed'
-                   : source.status === 'ready' ? '' : 'busy';
+  if (isWorking(source)) el.classList.add('working');
   el.innerHTML =
     '<span class="twist"></span>' +
     iconSvg(source.kind, source.original_filename) +
-    `<span class="name">${esc(source.title)}</span>` +
-    (source.status === 'ready' ? '' :
-      `<span class="state ${stateClass}">${source.status}</span>`);
-  el.title = source.error || `${source.kind}, ${bytes(source.byte_size)}`;
+    `<span class="name">${esc(source.title)}</span>`;
+  el.append(statusMark(source));
+  el.dataset.progress = source.progress || '';
+  el.title = nodeTitle(source);
   if (state.scope.has(source.id)) el.classList.add('scoped');
   if (state.selectedNode === 's:' + source.id) el.classList.add('sel');
 
-  el.onclick = () => {
-    state.selectedNode = 's:' + source.id;
-    state.scope.has(source.id) ? state.scope.delete(source.id) : state.scope.add(source.id);
-    renderTree();
-  };
+  el.onclick = e => selectSource(source, e);
   el.ondblclick = () => openViewer(source);
-  el.oncontextmenu = e => { e.preventDefault(); sourceMenu(e, source); };
-  el.ondragstart = e => { e.dataTransfer.setData('text/plain', source.id); };
+  el.oncontextmenu = e => {
+    e.preventDefault();
+    // Right clicking outside the selection moves the selection there first.
+    if (!state.scope.has(source.id)) selectSource(source, {});
+    sourceMenu(e, source);
+  };
+  el.ondragstart = e => startDrag(e, source);
+  el.ondragend = stopDragScroll;
   return el;
 }
 
+/* Explorer selection: click picks one, ctrl or cmd adds and removes, shift
+   takes the range from the last click. The selection is the retrieval scope,
+   so picking files here is what narrows the next question. */
+function selectSource(source, e = {}) {
+  const order = state.rowOrder;
+  const additive = e.ctrlKey || e.metaKey;
+
+  if (e.shiftKey && state.anchorId && order.includes(state.anchorId)) {
+    const from = order.indexOf(state.anchorId);
+    const to = order.indexOf(source.id);
+    if (!additive) state.scope.clear();
+    for (const id of order.slice(Math.min(from, to), Math.max(from, to) + 1)) {
+      state.scope.add(id);
+    }
+  } else if (additive) {
+    state.scope.has(source.id) ? state.scope.delete(source.id) : state.scope.add(source.id);
+    state.anchorId = source.id;
+  } else {
+    state.scope = new Set([source.id]);
+    state.anchorId = source.id;
+  }
+
+  state.selectedNode = 's:' + source.id;
+  renderTree();
+}
+
+/* Drag the whole selection, and show what is moving under the cursor. */
+function startDrag(e, source) {
+  if (!state.scope.has(source.id)) selectSource(source, {});
+  state.dragging = [...state.scope];
+
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', state.dragging.join(','));
+
+  const ghost = document.createElement('div');
+  ghost.className = 'drag-ghost';
+  ghost.innerHTML = state.dragging.length > 1
+    ? `${iconSvg('file')}<span>${state.dragging.length} files</span>`
+    : `${iconSvg(source.kind, source.original_filename)}<span>${esc(source.title)}</span>`;
+  document.body.append(ghost);
+  e.dataTransfer.setDragImage(ghost, 14, 14);
+  setTimeout(() => ghost.remove(), 0);
+}
+
 async function drop(folderId) {
-  const id = state.dragging;
-  if (!id) return;
-  await api('/api/sources/' + id, { method: 'PATCH', json: { folder_id: folderId } });
+  const ids = state.dragging || [];
+  stopDragScroll();
+  if (!ids.length) return;
   state.dragging = null;
+  for (const id of ids) {
+    await api('/api/sources/' + id, { method: 'PATCH', json: { folder_id: folderId } });
+  }
+  if (folderId) state.open.add(folderId);
   loadTree();
 }
-document.addEventListener('dragstart', e => {
-  const node = e.target.closest?.('[data-source-id]');
-  state.dragging = node ? node.dataset.sourceId : null;
-});
 
-$('#tree').ondragover = e => { e.preventDefault(); };
+/* A drag holds the pointer, so the wheel does not scroll the list. Nudge it
+   when the cursor sits near either edge, the way a file manager does. */
+function dragScrollFrom(e) {
+  const tree = $('#tree');
+  const box = tree.getBoundingClientRect();
+  const edge = 34;
+  if (e.clientY < box.top + edge) state.dragScroll = -14;
+  else if (e.clientY > box.bottom - edge) state.dragScroll = 14;
+  else state.dragScroll = 0;
+
+  if (!state.dragScrollTimer) {
+    state.dragScrollTimer = setInterval(() => {
+      if (state.dragScroll) tree.scrollTop += state.dragScroll;
+    }, 16);
+  }
+}
+
+function stopDragScroll() {
+  clearInterval(state.dragScrollTimer);
+  state.dragScrollTimer = null;
+  state.dragScroll = 0;
+}
+
+document.addEventListener('dragend', stopDragScroll);
+document.addEventListener('drop', stopDragScroll);
+
+$('#tree').ondragover = e => { e.preventDefault(); dragScrollFrom(e); };
+$('#tree').ondragleave = e => { if (!e.relatedTarget) stopDragScroll(); };
 $('#tree').ondrop = e => {
   if (e.target.closest('[data-folder-id]')) return;
   e.preventDefault();
   if (state.dragging) drop(null);
 };
+// Clicking past the last row clears the selection, like any file list.
+$('#tree').addEventListener('mousedown', e => {
+  if (e.target !== $('#tree') || e.button !== 0) return;
+  state.scope.clear();
+  state.selectedNode = null;
+  renderTree();
+});
 $('#clearScope').onclick = () => { state.scope.clear(); renderTree(); };
 $('#refreshTree').onclick = loadTree;
 $('#newFolderBtn').onclick = () => createFolder(null);
@@ -778,8 +1065,8 @@ const ask = (title, message, confirmLabel = 'Delete') =>
 const askText = (title, value = '', confirmLabel = 'Save') =>
   dialog({ title, confirmLabel, input: { value } });
 
-const askChoice = (title, message, choices) =>
-  dialog({ title, message, choices, confirmLabel: 'Move' });
+const askChoice = (title, message, choices, confirmLabel = 'OK') =>
+  dialog({ title, message, choices, confirmLabel });
 
 /* ------------------------------------------------------ context menu */
 function showMenu(e, items) {
@@ -816,9 +1103,8 @@ function sourceMenu(e, source) {
   const folders = state.folders;
   showMenu(e, [
     { label: 'Open', key: 'dbl click', run: () => openViewer(source) },
-    { label: state.scope.has(source.id) ? 'Remove from scope' : 'Add to scope',
-      run: () => { state.scope.has(source.id) ? state.scope.delete(source.id)
-                                              : state.scope.add(source.id); renderTree(); } },
+    { label: state.scope.has(source.id) ? 'Remove from selection' : 'Add to selection',
+      run: () => selectSource(source, { ctrlKey: true }) },
     '-',
     { label: 'Rename', key: 'F2', run: () => renameSource(source) },
     ...(folders.length ? [{ label: 'Move to folder', run: () => moveSource(source) }] : []),
@@ -826,20 +1112,11 @@ function sourceMenu(e, source) {
         await api('/api/sources/' + source.id, { method: 'PATCH', json: { folder_id: null } });
         loadTree();
       } }] : []),
-    { label: 'Re-run analyzer', run: async () => {
-        note(`re-analyzing ${source.title}`);
-        try { await api('/api/sources/' + source.id + '/reingest', { method: 'POST' }); }
-        catch (err) { note(err.message, true); }
-        loadTree();
-      } },
+    { label: 'Re-run analyzer', run: () => reanalyze(source, null) },
     '-',
-    { label: 'Delete', danger: true, run: async () => {
-        if (!await ask('Delete source', `"${source.title}" and its index entries go away. The file is removed from storage unless another source shares it.`)) return;
-        await api('/api/sources/' + source.id, { method: 'DELETE' });
-        state.scope.delete(source.id);
-        if (state.viewerSource?.id === source.id) closeViewer();
-        loadTree();
-      } },
+    { label: selectionCount(source) > 1 ? `Delete ${selectionCount(source)} sources` : 'Delete',
+      danger: true,
+      run: () => deleteSources(selectionCount(source) > 1 ? [...state.scope] : [source.id]) },
   ]);
 }
 
@@ -862,6 +1139,84 @@ function folderMenu(e, folder) {
   ]);
 }
 
+/* The server waits out a rate limit on its own schedule. When the provider is
+   still refusing after that, the decision is a person's: run this file on a
+   different model, or leave it. */
+async function analyzerFailed(source, error) {
+  const payload = error.payload || {};
+  if (payload.kind !== 'rate_limited') {
+    note(`${source.title}: ${error.message}`, true);
+    return;
+  }
+
+  let candidates = [];
+  try {
+    const { models } = await api('/api/models');
+    candidates = models.filter(m => m.supports_vision && m.id !== payload.model_id);
+  } catch (e) {
+    note(e.message, true);
+  }
+
+  if (!candidates.length) {
+    await say(`${error.message}\n\nNo other vision-capable model is configured. ` +
+              'Add one in Configure, or try again when the provider is quieter.',
+              'Rate limited');
+    return;
+  }
+
+  const choices = candidates.map(m => ({
+    value: m.id,
+    label: `${m.display_name} (${m.provider_name})`,
+  }));
+  const pick = await askChoice(
+    'Rate limited',
+    `${error.message}\n\nRun "${source.title}" on a different model instead?`,
+    choices,
+    'Retry on this model',
+  );
+  if (!pick) return;
+
+  await reanalyze(source, pick);
+}
+
+/* Re-run the analyzer, optionally on a model chosen by hand. */
+async function reanalyze(source, modelId) {
+  note(`queued ${source.title} for the analyzer${modelId ? ' on the model you picked' : ''}`);
+  try {
+    await api('/api/sources/' + source.id + '/reingest',
+              { method: 'POST', json: modelId ? { model_id: modelId } : {} });
+  } catch (e) {
+    await analyzerFailed(source, e);
+  }
+  // The outcome arrives through the status watcher, not this request.
+  state.analysisTotal = 0;
+  loadTree();
+}
+
+/* How many files an action on this row applies to: the selection when the row
+   is part of it, otherwise just the row. */
+function selectionCount(source) {
+  return state.scope.has(source.id) ? state.scope.size : 1;
+}
+
+async function deleteSources(ids) {
+  const many = ids.length > 1;
+  const titles = ids
+    .map(id => state.sources.find(s => s.id === id)?.title)
+    .filter(Boolean);
+  const message = many
+    ? `${titles.slice(0, 6).join(', ')}${titles.length > 6 ? ` and ${titles.length - 6} more` : ''} go away, with their index entries.`
+    : `"${titles[0]}" and its index entries go away. The file is removed from storage unless another source shares it.`;
+  if (!await ask(many ? `Delete ${ids.length} sources` : 'Delete source', message)) return;
+
+  for (const id of ids) {
+    await api('/api/sources/' + id, { method: 'DELETE' });
+    state.scope.delete(id);
+    if (state.viewerSource?.id === id) closeViewer();
+  }
+  loadTree();
+}
+
 async function renameSource(source) {
   const name = await askText('Rename source', source.title);
   if (!name || name === source.title) return;
@@ -872,7 +1227,7 @@ async function renameSource(source) {
 async function moveSource(source) {
   const choices = state.folders.map(f => ({ value: f.id, label: f.name }));
   const folderId = await askChoice('Move source', `Where should "${source.title}" go?`,
-                                   choices);
+                                   choices, 'Move');
   if (!folderId) return;
   await api('/api/sources/' + source.id, { method: 'PATCH', json: { folder_id: folderId } });
   state.open.add(folderId);
@@ -898,21 +1253,23 @@ async function upload(files, folderId) {
   if (!files.length) return;
   const target = folderId || state.uploadInto || null;
   state.uploadInto = null;
-  $('#treeStatus').textContent = `uploading ${files.length} file(s)`;
+  state.uploading = files.length;
+  renderTreeStatus();
 
   const fd = new FormData();
   for (const f of files) fd.append('file', f);
   if (target) fd.append('folder_id', target);
 
   try {
+    // This returns as soon as the bytes are on disk. Analysis runs server side
+    // from there, so the rows appear at once and fill in as they are read.
     const res = await api('/api/sources', { method: 'POST', body: fd });
-    for (const u of res.uploaded) {
-      if (u.ingest_error) note(`${u.source.title}: ${u.ingest_error}`, true);
-    }
+    state.analysisTotal = res.uploaded.length;
     if (target) state.open.add(target);
   } catch (e) {
     note('upload failed: ' + e.message, true);
   }
+  state.uploading = 0;
   loadTree();
 }
 
@@ -1383,9 +1740,13 @@ function finishTurn(el, res) {
   const meta = document.createElement('div');
   meta.className = 'meta-line';
   const model = document.createElement('span');
+  // Citations are only the excerpts the answer actually used, so say when a
+  // search happened and none of it was cited.
+  const searched = res.excerpts_searched && !(res.citations || []).length
+    ? `, ${res.excerpts_searched} excerpts searched` : '';
   model.textContent = res.model_display_name +
     (res.effort && res.effort !== 'off' ? `, ${res.effort} effort` : '') +
-    (seconds ? `, ${seconds}s` : '');
+    (seconds ? `, ${seconds}s` : '') + searched;
   meta.append(model);
   for (const c of res.citations || []) {
     const b = document.createElement('button');

@@ -33,6 +33,8 @@ async fn main() -> anyhow::Result<()> {
 
     let bind_addr = config.bind_addr.clone();
     let state = AppState::new(db, storage, config, user_id);
+    // Anything a previous run left mid-analysis picks up again here.
+    analyzer::resume_pending(&state).await;
     let app = routes::router(state);
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;

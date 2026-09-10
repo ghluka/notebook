@@ -38,6 +38,16 @@ impl OpenAiProvider {
                         "file_data": format!("data:{media_type};base64,{data}")
                     }
                 })),
+                // vLLM / Nemotron Omni style: data URIs work without sharing a
+                // filesystem with the server, unlike `file://` URIs.
+                ContentPart::Audio { media_type, data } => parts.push(json!({
+                    "type": "audio_url",
+                    "audio_url": { "url": format!("data:{media_type};base64,{data}") }
+                })),
+                ContentPart::Video { media_type, data } => parts.push(json!({
+                    "type": "video_url",
+                    "video_url": { "url": format!("data:{media_type};base64,{data}") }
+                })),
                 ContentPart::ToolUse { id, name, input } => tool_calls.push(json!({
                     "id": id,
                     "type": "function",
@@ -130,9 +140,14 @@ impl LlmProvider for OpenAiProvider {
         let resp = req_builder.json(&body).send().await?;
 
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let raw = resp.text().await?;
         if !status.is_success() {
-            return Err(LlmError::Api { status: status.as_u16(), body: raw });
+            return Err(LlmError::Api { status: status.as_u16(), body: raw, retry_after });
         }
         let v: Value = serde_json::from_str(&raw)?;
         let choice = &v["choices"][0];
@@ -157,7 +172,17 @@ impl LlmProvider for OpenAiProvider {
             .unwrap_or_default();
 
         Ok(ChatResponse {
-            text: message["content"].as_str().unwrap_or_default().to_string(),
+            // Some servers return content as a string, others as an array of
+            // `{ "type": "text", "text": ... }` parts.
+            text: match &message["content"] {
+                Value::String(s) => s.clone(),
+                Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|p| p["text"].as_str().or_else(|| p.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => String::new(),
+            },
             thinking: message["reasoning_content"].as_str().map(str::to_string),
             tool_calls,
             stop_reason: choice["finish_reason"].as_str().unwrap_or("stop").to_string(),

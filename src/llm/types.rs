@@ -36,6 +36,19 @@ pub enum ContentPart {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
     },
+    /// Base64 audio bytes, e.g. `audio/wav`. OpenAI-style endpoints send this
+    /// as `audio_url` with a data URI (the Nemotron Omni syntax); Anthropic
+    /// has no audio input and errors rather than silently dropping it.
+    Audio {
+        media_type: String,
+        data: String,
+    },
+    /// Base64 video bytes, e.g. `video/mp4`. OpenAI-style endpoints send this
+    /// as `video_url` with a data URI; Anthropic errors.
+    Video {
+        media_type: String,
+        data: String,
+    },
     /// A model's request to call a tool.
     ToolUse {
         id: String,

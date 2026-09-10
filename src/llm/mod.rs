@@ -22,7 +22,14 @@ pub enum LlmError {
     #[error("{0}")]
     MissingKey(String),
     #[error("provider returned {status}: {body}")]
-    Api { status: u16, body: String },
+    Api {
+        status: u16,
+        body: String,
+        /// Seconds the provider asked us to wait, when it said so.
+        retry_after: Option<u64>,
+    },
+    #[error("the provider stayed rate limited after {waited}s of waiting: {body}")]
+    RateLimited { status: u16, body: String, waited: u64 },
     #[error("bad request: {0}")]
     Request(String),
     #[error("transport: {0}")]
@@ -31,10 +38,119 @@ pub enum LlmError {
     Decode(#[from] serde_json::Error),
 }
 
+impl LlmError {
+    /// Whether waiting could plausibly fix this. Rate limits and the various
+    /// "busy right now" statuses qualify; a 400 or a 401 never will.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            LlmError::Api { status, body, .. } => {
+                matches!(status, 408 | 409 | 425 | 429 | 500 | 502 | 503 | 504)
+                    || mentions_rate_limit(body)
+            }
+            // A dropped or timed out request is worth one more go.
+            LlmError::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+            _ => false,
+        }
+    }
+
+    pub fn is_rate_limited(&self) -> bool {
+        matches!(self, LlmError::RateLimited { .. })
+    }
+
+    fn retry_after(&self) -> Option<u64> {
+        match self {
+            LlmError::Api { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+}
+
+/// Providers phrase exhaustion differently and not all of them use a 429.
+/// Gemini says "high demand", NVIDIA says "ResourceExhausted", Anthropic says
+/// "overloaded_error".
+fn mentions_rate_limit(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    [
+        "rate limit",
+        "rate_limit",
+        "ratelimit",
+        "resourceexhausted",
+        "resource_exhausted",
+        "quota",
+        "high demand",
+        "overloaded",
+        "unavailable",
+        "too many requests",
+        "capacity",
+        "try again later",
+    ]
+    .iter()
+    .any(|m| body.contains(m))
+}
+
+/// How long to wait between attempts. A short first wait rides out a burst;
+/// the two long ones cover a provider that is genuinely saturated. After the
+/// last one the caller is told, so a person can decide what to do.
+pub const RETRY_WAITS: &[u64] = &[5, 60, 60];
+/// Never wait longer than this, whatever a `Retry-After` header claims.
+const MAX_WAIT: u64 = 120;
+
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     fn name(&self) -> &'static str;
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError>;
+}
+
+/// Call a provider, waiting out rate limits on the schedule in `RETRY_WAITS`.
+///
+/// A provider that is still refusing after the last wait returns
+/// `LlmError::RateLimited`, which callers surface as its own kind of failure
+/// rather than pretending the request was impossible: waiting longer or moving
+/// to another model would both have worked.
+pub async fn chat_with_retry(
+    client: &dyn LlmProvider,
+    req: &ChatRequest,
+) -> Result<ChatResponse, LlmError> {
+    chat_with_schedule(client, req, RETRY_WAITS).await
+}
+
+/// The same, with the waits given explicitly. Tests pass zeroes.
+pub async fn chat_with_schedule(
+    client: &dyn LlmProvider,
+    req: &ChatRequest,
+    waits: &[u64],
+) -> Result<ChatResponse, LlmError> {
+    let mut waited = 0;
+
+    for (attempt, base) in waits.iter().enumerate() {
+        match client.chat(req).await {
+            Ok(response) => return Ok(response),
+            Err(e) if e.is_retryable() => {
+                // Honour the provider's own advice when it gives any.
+                let wait = e.retry_after().unwrap_or(*base).clamp(*base, MAX_WAIT.max(*base));
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    wait_seconds = wait,
+                    error = %e,
+                    "provider is busy, waiting before retrying"
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                waited += wait;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    match client.chat(req).await {
+        Ok(response) => Ok(response),
+        Err(LlmError::Api { status, body, .. }) => {
+            Err(LlmError::RateLimited { status, body, waited })
+        }
+        Err(e) if e.is_retryable() => {
+            Err(LlmError::RateLimited { status: 0, body: e.to_string(), waited })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Wrap raw file bytes as a content part the analyzer can look at.
@@ -42,11 +158,128 @@ pub fn part_for_file(media_type: &str, bytes: &[u8], filename: Option<&str>) -> 
     let data = B64.encode(bytes);
     if media_type.starts_with("image/") {
         ContentPart::Image { media_type: media_type.to_string(), data }
+    } else if media_type.starts_with("audio/") {
+        ContentPart::Audio { media_type: media_type.to_string(), data }
+    } else if media_type.starts_with("video/") {
+        ContentPart::Video { media_type: media_type.to_string(), data }
     } else {
         ContentPart::Document {
             media_type: media_type.to_string(),
             data,
             filename: filename.map(|s| s.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Fails `fail_times` times with `status` and `body`, then succeeds.
+    struct Flaky {
+        calls: AtomicUsize,
+        fail_times: usize,
+        status: u16,
+        body: &'static str,
+    }
+
+    impl Flaky {
+        fn new(fail_times: usize, status: u16, body: &'static str) -> Self {
+            Flaky { calls: AtomicUsize::new(0), fail_times, status, body }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for Flaky {
+        fn name(&self) -> &'static str {
+            "flaky"
+        }
+
+        async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            if n < self.fail_times {
+                return Err(LlmError::Api {
+                    status: self.status,
+                    body: self.body.to_string(),
+                    retry_after: None,
+                });
+            }
+            Ok(ChatResponse {
+                text: "ok".into(),
+                thinking: None,
+                tool_calls: Vec::new(),
+                stop_reason: "end_turn".into(),
+                usage: Usage::default(),
+                model: "flaky".into(),
+            })
+        }
+    }
+
+    fn request() -> ChatRequest {
+        ChatRequest::new("m", vec![Message::user("hi")])
+    }
+
+    /// The two bodies that started this: NVIDIA and Gemini, both saying busy
+    /// without saying 429.
+    #[test]
+    fn recognises_real_rate_limit_bodies() {
+        let nvidia = LlmError::Api {
+            status: 503,
+            body: r#"{"error":{"message":"ResourceExhausted: Worker local total request limit reached (16/16)","type":"Service Unavailable","code":503}}"#.into(),
+            retry_after: None,
+        };
+        let gemini = LlmError::Api {
+            status: 503,
+            body: r#"[{ "error": { "code": 503, "message": "This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.", "status": "UNAVAILABLE" } } ]"#.into(),
+            retry_after: None,
+        };
+        let too_many = LlmError::Api { status: 429, body: "slow down".into(), retry_after: None };
+
+        assert!(nvidia.is_retryable());
+        assert!(gemini.is_retryable());
+        assert!(too_many.is_retryable());
+    }
+
+    #[test]
+    fn leaves_real_failures_alone() {
+        let bad_request = LlmError::Api {
+            status: 400,
+            body: "model does not accept image parts".into(),
+            retry_after: None,
+        };
+        let unauthorised =
+            LlmError::Api { status: 401, body: "invalid api key".into(), retry_after: None };
+
+        assert!(!bad_request.is_retryable());
+        assert!(!unauthorised.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn retries_until_the_provider_recovers() {
+        let flaky = Flaky::new(2, 503, "high demand");
+        let out = chat_with_schedule(&flaky, &request(), &[0, 0, 0]).await.unwrap();
+
+        assert_eq!(out.text, "ok");
+        assert_eq!(flaky.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn gives_up_as_a_rate_limit_not_a_dead_end() {
+        let flaky = Flaky::new(usize::MAX, 503, "ResourceExhausted");
+        let err = chat_with_schedule(&flaky, &request(), &[0, 0, 0]).await.unwrap_err();
+
+        assert!(err.is_rate_limited(), "got {err:?}");
+        // One attempt per wait, plus the final one after the last wait.
+        assert_eq!(flaky.calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_fails_immediately() {
+        let flaky = Flaky::new(usize::MAX, 400, "unsupported content part");
+        let err = chat_with_schedule(&flaky, &request(), &[0, 0, 0]).await.unwrap_err();
+
+        assert!(!err.is_rate_limited());
+        assert_eq!(flaky.calls.load(Ordering::SeqCst), 1, "must not retry a 400");
     }
 }

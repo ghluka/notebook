@@ -622,7 +622,7 @@ pub struct Capabilities {
 const VISION_MARKERS: &[&str] = &[
     "vision", "-vl", "vl-", "vlm", "multimodal", "omni", "llava", "pixtral",
     "internvl", "minicpm-v", "idefics", "moondream", "smolvlm", "kosmos",
-    "fuyu", "neva", "vila", "deplot", "paligemma", "nemotron-parse", "cosmos",
+    "fuyu", "neva", "vila", "deplot", "paligemma", "nemotron", "cosmos",
     "gemma-3", "gemma-4", "mistral-small-3", "ministral-3", "phi-3-vision",
     "phi-4-multimodal", "llama-3.2-11b", "llama-3.2-90b", "llama-guard-4",
 ];
@@ -779,7 +779,7 @@ async fn data_array(req: reqwest::RequestBuilder) -> Result<Vec<serde_json::Valu
     let status = resp.status();
     let body = resp.text().await?;
     if !status.is_success() {
-        return Err(LlmError::Api { status: status.as_u16(), body });
+        return Err(LlmError::Api { status: status.as_u16(), body, retry_after: None });
     }
     let v: serde_json::Value = serde_json::from_str(&body)?;
     Ok(v["data"].as_array().cloned().unwrap_or_default())

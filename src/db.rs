@@ -44,6 +44,10 @@ pub struct Source {
     pub storage_path: String,
     pub status: String,
     pub error: Option<String>,
+    /// The failure as JSON, when there was one. Same shape the API returns.
+    pub error_detail: Option<String>,
+    /// How far the analyzer has got, as "done/total", while it is working.
+    pub progress: Option<String>,
     pub metadata: String,
     pub created_at: String,
     pub updated_at: String,
@@ -218,14 +222,58 @@ pub async fn set_source_status(
     status: &str,
     error: Option<&str>,
 ) -> sqlx::Result<()> {
-    sqlx::query("UPDATE sources SET status = ?2, error = ?3, updated_at = ?4 WHERE id = ?1")
+    set_source_result(db, id, status, error, None).await
+}
+
+/// Status plus the structured failure, which the client reads to tell a rate
+/// limit apart from a file it will never be able to read.
+pub async fn set_source_result(
+    db: &Db,
+    id: &str,
+    status: &str,
+    error: Option<&str>,
+    detail: Option<&str>,
+) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sources SET status = ?2, error = ?3, error_detail = ?4, updated_at = ?5,
+                progress = CASE WHEN ?2 IN ('pending', 'analyzing') THEN progress END
+          WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(status)
+    .bind(error)
+    .bind(detail)
+    .bind(now())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// How far through a long file the analyzer is. Cleared when it finishes, so
+/// a stale count never sits under a ready source.
+pub async fn set_source_progress(
+    db: &Db,
+    id: &str,
+    done: i64,
+    total: i64,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sources SET progress = ?2 WHERE id = ?1")
         .bind(id)
-        .bind(status)
-        .bind(error)
-        .bind(now())
+        .bind(format!("{done}/{total}"))
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Sources waiting for the analyzer, oldest first. Used to pick work back up
+/// after a restart, so nothing is stranded mid-queue.
+pub async fn pending_sources(db: &Db) -> sqlx::Result<Vec<Source>> {
+    sqlx::query_as::<_, Source>(
+        "SELECT * FROM sources WHERE status IN ('pending', 'analyzing')
+          ORDER BY created_at",
+    )
+    .fetch_all(db)
+    .await
 }
 
 pub async fn delete_source(db: &Db, id: &str) -> sqlx::Result<()> {
@@ -392,15 +440,62 @@ pub async fn chunks_for_source(db: &Db, source_id: &str) -> sqlx::Result<Vec<Sea
     .await
 }
 
+/// Words that say how to answer rather than what to look for. A question like
+/// "whats an lde, give an example and explain it in depth" otherwise buries the
+/// one rare word that matters under chunks matching "give", "explain" and
+/// "depth", which is exactly the ranking bm25 cannot save you from.
+const STOPWORDS: &[&str] = &[
+    "a", "about", "all", "am", "an", "and", "any", "are", "as", "at", "be", "been", "being",
+    "but", "by", "can", "could", "describe", "did", "do", "does", "explain", "for", "from",
+    "get", "give", "had", "has", "have", "he", "her", "him", "his", "how", "i", "if", "in",
+    "into", "is", "it", "its", "just", "know", "let", "like", "make", "me", "mean", "more",
+    "much", "my", "need", "of", "on", "one", "or", "our", "out", "please", "say", "she",
+    "should", "show", "so", "some", "such", "tell", "than", "that", "the", "their", "them",
+    "then", "there", "these", "they", "this", "those", "to", "up", "us", "was", "we", "were",
+    "what", "whats", "when", "where", "which", "while", "who", "why", "will", "with", "would",
+    "you", "your", "depth", "detail", "please", "thanks",
+];
+
 /// Turn arbitrary user text into FTS5 terms. Everything is quoted, so operator
 /// characters in a question can never produce a malformed MATCH expression.
+///
+/// Function words are dropped, unless that would leave nothing to search for.
 fn fts_terms(query: &str) -> Vec<String> {
-    query
+    let words: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
         .filter(|t| t.chars().count() > 1)
-        .take(24)
-        .map(|t| format!("\"{}\"", t.to_lowercase()))
-        .collect()
+        .map(str::to_lowercase)
+        .take(32)
+        .collect();
+
+    let content: Vec<&String> =
+        words.iter().filter(|w| !STOPWORDS.contains(&w.as_str())).collect();
+
+    let chosen: Vec<&String> = if content.is_empty() { words.iter().collect() } else { content };
+    chosen.into_iter().take(24).map(|t| format!("\"{t}\"")).collect()
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::fts_terms;
+
+    #[test]
+    fn drops_the_words_that_bury_the_rare_one() {
+        let terms = fts_terms("whats an lde, give an example and explain it in depth");
+        assert_eq!(terms, vec!["\"lde\"", "\"example\""]);
+    }
+
+    #[test]
+    fn a_question_of_only_function_words_still_searches() {
+        let terms = fts_terms("what is it about");
+        assert!(!terms.is_empty(), "dropping everything would return nothing at all");
+    }
+
+    #[test]
+    fn quotes_everything_so_operators_cannot_leak() {
+        let terms = fts_terms("NOT (a OR b) AND \"c\"");
+        assert!(terms.iter().all(|t| t.starts_with('"') && t.ends_with('"')));
+    }
 }
 
 // ---------------------------------------------------------- conversations

@@ -106,7 +106,19 @@ pub async fn compact(
         .system(COMPACT_SYSTEM)
         .max_tokens(resolved.model.max_output_tokens.min(4096) as u32);
 
-    let response = resolved.client(&state.http)?.chat(&request).await?;
+    let client = resolved.client(&state.http)?;
+    let response = crate::llm::chat_with_retry(client.as_ref(), &request).await.map_err(|e| {
+        if e.is_rate_limited() {
+            AppError::from_rate_limit(
+                e,
+                &resolved.model.id,
+                &resolved.model.display_name,
+                " while compacting",
+            )
+        } else {
+            AppError::Llm(e)
+        }
+    })?;
     let summary = response.text.trim().to_string();
     if summary.is_empty() {
         return Err(AppError::Unsupported(

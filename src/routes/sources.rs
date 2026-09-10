@@ -18,8 +18,6 @@ pub struct Uploaded {
     source: Source,
     /// False when these exact bytes were already in the store.
     stored_new_blob: bool,
-    /// Present when ingestion failed; the source is still stored.
-    ingest_error: Option<String>,
 }
 
 /// `POST /api/sources` takes any number of `file` parts, so one drop of a dozen
@@ -107,17 +105,12 @@ pub async fn upload(
         )
         .await?;
 
-        // Text ingestion is fast enough to run inline. Phase 1 moves this behind
-        // a job queue, at which point the response returns with status pending.
-        let ingest_error = match analyzer::ingest(&state, &source).await {
-            Ok(()) => None,
-            Err(e) => Some(e.to_string()),
-        };
-
-        let source =
-            db::get_source(&state.db, &source.id).await?.ok_or(sqlx::Error::RowNotFound)?;
-        uploaded.push(Uploaded { source, stored_new_blob, ingest_error });
+        uploaded.push(Uploaded { source, stored_new_blob });
     }
+
+    // Storing is done; analyzing starts now and outlives this request, so the
+    // response returns as fast as the disk writes.
+    analyzer::spawn_analysis(&state, uploaded.iter().map(|u| u.source.clone()).collect());
 
     Ok(Json(json!({ "uploaded": uploaded })))
 }
@@ -193,13 +186,41 @@ pub async fn raw(State(state): State<AppState>, Path(id): Path<String>) -> AppRe
         .into_response())
 }
 
-/// `POST /api/sources/{id}/reingest` re-runs the analyzer over stored bytes.
+#[derive(Deserialize, Default)]
+pub struct ReingestBody {
+    /// Run on this model instead of the one holding the analyzer role. Set by
+    /// the client when retrying after a rate limit on a different model.
+    #[serde(default)]
+    pub model_id: Option<String>,
+}
+
+/// `POST /api/sources/{id}/reingest` queues the analyzer over stored bytes and
+/// returns at once. Watch the source's status for the outcome.
 pub async fn reingest(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    body: Option<Json<ReingestBody>>,
 ) -> AppResult<Json<Source>> {
     let source = load(&state, &id).await?;
-    analyzer::ingest(&state, &source).await?;
+    let model_id = body.and_then(|Json(b)| b.model_id).filter(|m| !m.trim().is_empty());
+
+    db::set_source_result(&state.db, &source.id, "pending", None, None).await?;
+    match model_id {
+        // A hand picked model is a one off, so it runs on its own rather than
+        // through the shared queue path that always resolves the role.
+        Some(model) => {
+            let state = state.clone();
+            let source = source.clone();
+            tokio::spawn(async move {
+                let _slot = state.analysis.clone().acquire_owned().await;
+                if let Err(e) = analyzer::ingest_with(&state, &source, Some(&model)).await {
+                    tracing::warn!(source = %source.id, error = %e, "analysis failed");
+                }
+            });
+        }
+        None => analyzer::spawn_analysis(&state, vec![source.clone()]),
+    }
+
     Ok(Json(load(&state, &id).await?))
 }
 

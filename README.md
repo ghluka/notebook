@@ -24,7 +24,7 @@ A local endpoint needs no key at all: `http://127.0.0.1:1234/v1` for LM Studio,
 
 `.env` (see `.env.example`) is optional and covers server settings only: bind
 address, database and upload paths. API keys do not go in it. The one exception
-is seeding a headless install, documented in AGENTS.md section 8.
+is seeding a headless install, documented in AGENTS.md section 10.
 
 ## API
 
@@ -41,7 +41,7 @@ is seeding a headless install, documented in AGENTS.md section 8.
 | PATCH/DELETE | `/api/folders/{id}` | rename or move / delete, leaving files at the root |
 | DELETE | `/api/sources/{id}` | drops rows; blob goes when unreferenced |
 | GET | `/api/sources/{id}/document` | markdown-latex rendition + chunks |
-| POST | `/api/sources/{id}/reingest` | re-run the analyzer over stored bytes |
+| POST | `/api/sources/{id}/reingest` | re-run the analyzer over stored bytes; optional `{"model_id"}` runs it on another model |
 | POST | `/api/sources/{id}/ask` | `{"question": "..."}` to the analyzer, on the ORIGINAL file |
 | GET | `/api/search?q=` | FTS5 over chunks (`source_id`, `limit` optional) |
 | GET | `/c/{id}` | permalink; serves the app, which opens that conversation |
@@ -58,6 +58,23 @@ is seeding a headless install, documented in AGENTS.md section 8.
 | POST | `/api/models` | add a model the endpoint doesn't advertise |
 | PATCH/DELETE | `/api/models/{id}` | pin, hide, edit capabilities / remove |
 | GET/PATCH | `/api/settings` | role assignments + thinking effort |
+
+## Uploading
+
+Files are stored the moment you drop them and appear in the explorer straight
+away, greyed with a spinner while the analyzer works through them one at a time.
+The footer counts the queue down. Analysis runs on the server, so refreshing the
+page or closing the tab does not cancel it, and a restart picks up whatever was
+still queued.
+
+## When a provider is busy
+
+Rate limits are waited out automatically: 5 seconds, then a minute, then another
+minute, honouring any `Retry-After` the provider sends. If it is still refusing
+after that, the analyzer says so and offers to run the file on a different
+model, because that is a choice only you can make. A busy provider is never
+reported as an unreadable file, and it never falls back to another path that
+would call the same exhausted endpoint.
 
 ## Conversations
 

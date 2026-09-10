@@ -30,6 +30,20 @@ impl AnthropicProvider {
                 "type": "document",
                 "source": { "type": "base64", "media_type": media_type, "data": data }
             }),
+            ContentPart::Audio { .. } => {
+                return Err(LlmError::Request(
+                    "this Anthropic-style endpoint does not take audio input; \
+                     assign an OpenAI-style omni model as the analyzer"
+                        .into(),
+                ));
+            }
+            ContentPart::Video { .. } => {
+                return Err(LlmError::Request(
+                    "this Anthropic-style endpoint does not take video input; \
+                     assign an OpenAI-style omni model as the analyzer"
+                        .into(),
+                ));
+            }
             ContentPart::ToolUse { id, name, input } => json!({
                 "type": "tool_use", "id": id, "name": name, "input": input
             }),
@@ -120,9 +134,14 @@ impl LlmProvider for AnthropicProvider {
             .await?;
 
         let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
         let raw = resp.text().await?;
         if !status.is_success() {
-            return Err(LlmError::Api { status: status.as_u16(), body: raw });
+            return Err(LlmError::Api { status: status.as_u16(), body: raw, retry_after });
         }
         let v: Value = serde_json::from_str(&raw)?;
 

@@ -21,6 +21,9 @@ pub struct Inner {
     /// registration yet, so it is always the seeded local user; when auth
     /// lands, this is what a session middleware fills in per request.
     pub user_id: String,
+    /// One analysis at a time, process wide. Analyzing a dropped folder in
+    /// parallel is the fastest way to get rate limited by your own provider.
+    pub analysis: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -29,7 +32,14 @@ impl AppState {
             .timeout(Duration::from_secs(600))
             .build()
             .expect("http client");
-        AppState(Arc::new(Inner { db, storage, http, config, user_id }))
+        AppState(Arc::new(Inner {
+            db,
+            storage,
+            http,
+            config,
+            user_id,
+            analysis: Arc::new(tokio::sync::Semaphore::new(1)),
+        }))
     }
 
     /// The model assigned to a role, with a message that points at the fix
