@@ -173,6 +173,18 @@
   .cite:hover { border-color:var(--accent); color:var(--fg); }
   .cite .count { color:var(--faint); font-size:11px;
                  font-variant-numeric:tabular-nums; }
+  /* Copy, retry and when it was said. They live on the meta line and only
+     show while the answer is under the pointer, so a finished transcript stays
+     quiet. Opacity rather than display, so revealing them moves nothing. */
+  .msg-actions { display:flex; align-items:center; gap:2px; margin-left:auto;
+                 opacity:0; transition:opacity .12s ease; }
+  .turn.assistant:hover .msg-actions, .msg-actions:focus-within { opacity:1; }
+  .msg-actions button { background:transparent; border:0; color:var(--faint);
+                        padding:5px; border-radius:7px; display:flex;
+                        align-items:center; justify-content:center; }
+  .msg-actions button:hover { background:var(--hover); color:var(--fg); }
+  .msg-actions button.done { color:var(--accent); }
+  .msg-actions .when { color:var(--faint); padding:0 5px; white-space:nowrap; }
   /* Where a citation lands in the rendition. */
   .viewer mark { background:#4a3a26; color:var(--fg); border-radius:3px; }
   .turn.note { color:var(--faint); font-size:13px; }
@@ -2116,6 +2128,146 @@ function stripCitations(text, citations = []) {
   return out.replace(CITED_FILE, '').replace(/[ \t]+([.,;:])/g, '$1');
 }
 
+const ACTION_ICON = {
+  copy: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"' +
+        ' stroke-width="1.4" stroke-linejoin="round">' +
+        '<rect x="5.6" y="5.6" width="7.9" height="7.9" rx="1.7"/>' +
+        '<path d="M10.4 3.3a1.7 1.7 0 0 0-1.6-1.2H4.2A1.7 1.7 0 0 0 2.5 3.8v4.7' +
+        'c0 .77.5 1.42 1.2 1.62"/></svg>',
+  check: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"' +
+         ' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">' +
+         '<path d="M3.4 8.5l3 3 6.2-6.6"/></svg>',
+  retry: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"' +
+         ' stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' +
+         '<path d="M13.3 8a5.3 5.3 0 1 1-1.63-3.82"/>' +
+         '<path d="M13.5 2.4v3.3h-3.3"/></svg>',
+};
+
+function actionButton(icon, label) {
+  const b = document.createElement('button');
+  b.innerHTML = ACTION_ICON[icon];
+  b.title = label;
+  b.setAttribute('aria-label', label);
+  return b;
+}
+
+/* How long ago, in the shape a person would say it. */
+function timeAgo(iso) {
+  const then = Date.parse(iso);
+  if (!then) return '';
+  const step = (n, unit) => n + ' ' + unit + (n === 1 ? ' ago' : 's ago');
+  const secs = Math.round((Date.now() - then) / 1000);
+  if (secs < 45) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return step(mins, 'minute');
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return step(hours, 'hour');
+  const days = Math.round(hours / 24);
+  if (days < 30) return step(days, 'day');
+  const months = Math.round(days / 30);
+  if (months < 12) return step(months, 'month');
+  return step(Math.round(months / 12), 'year');
+}
+
+/* The clipboard API needs a secure context and a permission; when it is not
+   there, the selection trick still is. */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.cssText = 'position:fixed;top:-1000px;opacity:0';
+    document.body.append(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    area.remove();
+    return ok;
+  }
+}
+
+function turnActions(el, res) {
+  const box = document.createElement('div');
+  box.className = 'msg-actions';
+
+  const stamp = res.created_at || new Date().toISOString();
+  const when = document.createElement('span');
+  when.className = 'when';
+  when.textContent = timeAgo(stamp);
+  when.title = new Date(stamp).toLocaleString();
+  // A turn that has been on screen a while should not still read "just now".
+  box.addEventListener('mouseenter', () => { when.textContent = timeAgo(stamp); });
+  box.append(when);
+
+  // What the answer says, without the citation marks the chips already cover.
+  const copy = actionButton('copy', 'Copy');
+  copy.onclick = async () => {
+    const ok = await copyText(stripCitations(res.answer || '', res.citations));
+    copy.innerHTML = ACTION_ICON[ok ? 'check' : 'copy'];
+    copy.classList.toggle('done', ok);
+    copy.title = ok ? 'Copied' : 'Could not copy';
+    setTimeout(() => {
+      copy.innerHTML = ACTION_ICON.copy;
+      copy.classList.remove('done');
+      copy.title = 'Copy';
+    }, 1500);
+  };
+  box.append(copy);
+
+  /* Retrying rewrites the transcript, so it needs a stored turn to rewrite.
+     A compacted turn is already folded into a summary that would no longer
+     match, so it stays as it is. */
+  if (res.message_id && !res.compacted) {
+    const again = actionButton('retry', 'Ask this question again');
+    again.onclick = () => retryTurn(el, res.message_id);
+    box.append(again);
+  }
+  return box;
+}
+
+/* The question behind an answer, which is the turn the retry replaces. */
+function priorQuestion(el) {
+  let node = el.previousElementSibling;
+  while (node && !node.classList.contains('user')) node = node.previousElementSibling;
+  return node;
+}
+
+async function retryTurn(el, messageId) {
+  if (composer.busy) return note('Wait for the current answer to finish first.');
+
+  // Everything after this answer was said in reply to it, so it cannot stay.
+  let following = 0;
+  for (let n = el.nextElementSibling; n; n = n.nextElementSibling) {
+    if (n.classList.contains('turn')) following++;
+  }
+  if (following) {
+    const ok = await ask('Retry this answer?',
+      'The ' + following + (following === 1 ? ' turn' : ' turns') +
+      ' after it will be removed as well.', 'Retry');
+    if (!ok) return;
+  }
+
+  let res;
+  try {
+    res = await api('/api/conversations/' + state.conversationId + '/retry',
+                    { method: 'POST', json: { message_id: messageId } });
+  } catch (e) {
+    return note(e.message, true);
+  }
+
+  // The question goes back on the thread with a fresh answer, so the old pair
+  // and anything after it comes off first.
+  for (let n = priorQuestion(el) || el; n; ) {
+    const next = n.nextElementSibling;
+    n.remove();
+    n = next;
+  }
+  loadChats();
+  runTurn(res.message);
+}
+
 function finishTurn(el, res) {
   const seconds = el.elapsed ? el.elapsed() : 0;
   stopTimer(el);
@@ -2167,6 +2319,7 @@ function finishTurn(el, res) {
     };
     meta.append(b);
   }
+  meta.append(turnActions(el, res));
   el.append(meta);
   el.scrollIntoView({ block: 'end' });
 }
@@ -2566,6 +2719,9 @@ async function openConversation(id, { fromHistory = false } = {}) {
         citations: JSON.parse(m.citations || '[]'),
         model_display_name: m.model || 'assistant',
         effort: 'off',
+        message_id: m.id,
+        compacted: m.compacted,
+        created_at: m.created_at,
       });
     }
   }

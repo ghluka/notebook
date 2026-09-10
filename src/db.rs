@@ -827,6 +827,36 @@ pub async fn conversation_messages(db: &Db, id: &str) -> sqlx::Result<Vec<Stored
     .await
 }
 
+/// Retrying an answer means unasking the question: the assistant turn, the
+/// question that produced it and everything said after it all go, and the
+/// question comes back so the caller can ask it again. Returns None when the
+/// message is not there, or when nothing before it was a question.
+pub async fn rewind_to_question(
+    db: &Db,
+    conversation_id: &str,
+    message_id: &str,
+) -> sqlx::Result<Option<(String, usize)>> {
+    let messages = conversation_messages(db, conversation_id).await?;
+    let Some(at) = messages.iter().position(|m| m.id == message_id) else {
+        return Ok(None);
+    };
+    let Some(question) = messages[..at].iter().rposition(|m| m.role == "user") else {
+        return Ok(None);
+    };
+
+    let doomed = &messages[question..];
+    for m in doomed {
+        sqlx::query("DELETE FROM messages WHERE id = ?1").bind(&m.id).execute(db).await?;
+    }
+    sqlx::query("UPDATE conversations SET updated_at = ?2 WHERE id = ?1")
+        .bind(conversation_id)
+        .bind(now())
+        .execute(db)
+        .await?;
+
+    Ok(Some((messages[question].content.clone(), doomed.len())))
+}
+
 /// What the next prompt should carry: only what has not been compacted away.
 pub async fn active_messages(db: &Db, id: &str) -> sqlx::Result<Vec<StoredMessage>> {
     sqlx::query_as::<_, StoredMessage>(
@@ -837,4 +867,53 @@ pub async fn active_messages(db: &Db, id: &str) -> sqlx::Result<Vec<StoredMessag
     .bind(id)
     .fetch_all(db)
     .await
+}
+
+#[cfg(test)]
+mod rewind_tests {
+    use super::*;
+
+    async fn scratch() -> (Db, String) {
+        let db = connect("sqlite::memory:").await.expect("in memory db");
+        sqlx::query("INSERT INTO users (id, name, created_at) VALUES ('u', 'test', ?1)")
+            .bind(now())
+            .execute(&db)
+            .await
+            .expect("user");
+        let c = create_conversation(&db, "u", "test").await.expect("conversation");
+        (db, c.id)
+    }
+
+    async fn say(db: &Db, id: &str, role: &str, text: &str) -> String {
+        append_message(db, id, role, text, None, None, None).await.expect("message")
+    }
+
+    #[tokio::test]
+    async fn rewind_takes_the_answer_its_question_and_what_followed() {
+        let (db, c) = scratch().await;
+        say(&db, &c, "user", "first question").await;
+        say(&db, &c, "assistant", "first answer").await;
+        say(&db, &c, "user", "second question").await;
+        let target = say(&db, &c, "assistant", "second answer").await;
+        say(&db, &c, "user", "third question").await;
+        say(&db, &c, "assistant", "third answer").await;
+
+        let (question, removed) =
+            rewind_to_question(&db, &c, &target).await.expect("query").expect("rewound");
+        assert_eq!(question, "second question");
+        assert_eq!(removed, 4);
+
+        let left = conversation_messages(&db, &c).await.expect("messages");
+        let texts: Vec<&str> = left.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(texts, vec!["first question", "first answer"]);
+    }
+
+    #[tokio::test]
+    async fn an_answer_with_no_question_behind_it_cannot_be_retried() {
+        let (db, c) = scratch().await;
+        let orphan = say(&db, &c, "assistant", "an answer to nothing").await;
+        assert!(rewind_to_question(&db, &c, &orphan).await.expect("query").is_none());
+        assert!(rewind_to_question(&db, &c, "no such message").await.expect("query").is_none());
+        assert_eq!(conversation_messages(&db, &c).await.expect("messages").len(), 1);
+    }
 }

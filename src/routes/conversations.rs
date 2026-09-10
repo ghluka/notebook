@@ -1,4 +1,4 @@
-//! Saved conversations: list them, reopen one, rename, delete, compact.
+//! Saved conversations: list them, reopen one, rename, delete, compact, rewind.
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -71,6 +71,37 @@ pub async fn delete(
 ) -> AppResult<Json<Value>> {
     db::delete_conversation(&state.db, &state.user_id, &id).await?;
     Ok(Json(json!({ "deleted": id })))
+}
+
+#[derive(Deserialize)]
+pub struct RetryBody {
+    pub message_id: String,
+}
+
+/// `POST /api/conversations/{id}/retry` takes an answer back out of the
+/// transcript along with the question behind it, and hands the question back.
+/// The client then asks it again, so the model never sees its own first attempt.
+/// Everything said after that point goes too: a conversation is a line, not a
+/// tree, and leaving orphaned turns behind would make the history a lie.
+pub async fn retry(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<RetryBody>,
+) -> AppResult<Json<Value>> {
+    let conversation = load(&state, &id).await?;
+    let rewound = db::rewind_to_question(&state.db, &conversation.id, &body.message_id).await?;
+
+    let Some((message, removed)) = rewound else {
+        return Err(AppError::BadRequest(
+            "there is no question behind that answer to ask again".into(),
+        ));
+    };
+
+    Ok(Json(json!({
+        "conversation_id": id,
+        "message": message,
+        "removed": removed,
+    })))
 }
 
 /// `POST /api/conversations/{id}/compact` folds the transcript into a summary

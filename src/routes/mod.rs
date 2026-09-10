@@ -40,6 +40,7 @@ pub fn router(state: AppState) -> Router {
             get(conversations::get).patch(conversations::rename).delete(conversations::delete),
         )
         .route("/conversations/{id}/compact", post(conversations::compact))
+        .route("/conversations/{id}/retry", post(conversations::retry))
         // Model configuration: what the prompt bar and Configure panel use.
         .route("/me", get(models::me))
         .route("/providers/presets", get(models::presets))
