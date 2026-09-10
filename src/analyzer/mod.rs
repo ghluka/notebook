@@ -132,6 +132,11 @@ pub async fn ingest_with(
     source: &Source,
     model_override: Option<&str>,
 ) -> AppResult<()> {
+    // A hand picked model means a deliberate fresh start, so nothing carries
+    // over from the run that failed.
+    if model_override.is_some() {
+        db::clear_partial(&state.db, &source.id).await?;
+    }
     db::set_source_status(&state.db, &source.id, "analyzing", None).await?;
 
     let result = run(state, source, model_override).await;
@@ -398,7 +403,18 @@ async fn analyze_page_images(
     let mut sections = Vec::new();
     let mut unreadable = Vec::new();
 
+    // Pick up where a previous run stopped. The saved progress counts pages of
+    // this same file, so a resume only makes sense when the totals agree.
     let mut start = 0;
+    if let (Some(partial), Some(progress)) = (&source.partial, &source.progress) {
+        if let Some((done, saved_total)) = parse_progress(progress) {
+            if saved_total == total && done > 0 && done < total {
+                tracing::info!(source = %source.id, page = done, "resuming analysis");
+                sections.push(partial.clone());
+                start = done;
+            }
+        }
+    }
     while start < total {
         // Rendered just before it is needed, so a long book never holds more
         // than one batch of page images in memory.
@@ -479,6 +495,15 @@ async fn analyze_page_images(
         }
         sections.push(text);
         start = batch_end;
+        // Saved after every batch, so a restart costs one batch, not the book.
+        db::save_partial(
+            &state.db,
+            &source.id,
+            &sections.join("\n\n"),
+            batch_end as i64,
+            total as i64,
+        )
+        .await?;
     }
 
     if !unreadable.is_empty() {
@@ -488,6 +513,7 @@ async fn analyze_page_images(
             unreadable.join(", ")
         ));
     }
+    db::clear_partial(&state.db, &source.id).await?;
     Ok((sections.join("\n\n"), Some(resolved.model.model_id.clone())))
 }
 
@@ -686,6 +712,12 @@ async fn analyze_pdf(
 
     // Only a non-vision model with a usable text layer reaches here.
     structure_text_layer(state, &resolved, filename, &extracted).await
+}
+
+/// "12/177" back into numbers.
+fn parse_progress(progress: &str) -> Option<(usize, usize)> {
+    let (done, total) = progress.split_once('/')?;
+    Some((done.trim().parse().ok()?, total.trim().parse().ok()?))
 }
 
 /// What the user sees when every PDF path failed: the provider's own words,

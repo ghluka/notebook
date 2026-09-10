@@ -211,7 +211,7 @@ pub async fn add_model(
     if models::get_provider(&state.db, &state.user_id, &body.provider_id).await?.is_none() {
         return Err(AppError::NotFound(format!("provider {}", body.provider_id)));
     }
-    Ok(Json(models::add_model(&state.db, body, "manual").await?))
+    Ok(Json(models::add_model(&state.db, body, "manual").await.map_err(duplicate_model_id)?))
 }
 
 pub async fn update_model(
@@ -220,9 +220,23 @@ pub async fn update_model(
     Json(body): Json<ModelPatch>,
 ) -> AppResult<Json<Model>> {
     let m = models::update_model(&state.db, &state.user_id, &id, body)
-        .await?
+        .await
+        .map_err(duplicate_model_id)?
         .ok_or_else(|| AppError::NotFound(format!("model {id}")))?;
     Ok(Json(m))
+}
+
+/// The unique index on (provider_id, model_id) is the only way these calls can
+/// fail on user input, and "database: UNIQUE constraint failed" helps nobody.
+fn duplicate_model_id(e: sqlx::Error) -> AppError {
+    if e.to_string().contains("models_provider_model_idx")
+        || e.to_string().contains("models.model_id")
+    {
+        return AppError::BadRequest(
+            "that model id already exists for this provider".into(),
+        );
+    }
+    AppError::Db(e)
 }
 
 pub async fn delete_model(

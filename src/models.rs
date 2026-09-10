@@ -367,6 +367,10 @@ async fn upsert_model(db: &Db, provider_id: &str, m: &UpsertModel) -> sqlx::Resu
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelPatch {
+    /// The id sent on the wire. Editable because endpoints that list nothing
+    /// (DeepSeek's Anthropic-style API among them) are typed in by hand, and a
+    /// typo should be fixable without losing the row's role and pin.
+    pub model_id: Option<String>,
     pub display_name: Option<String>,
     pub context_window: Option<i64>,
     pub max_output_tokens: Option<i64>,
@@ -386,7 +390,8 @@ pub async fn update_model(
 ) -> sqlx::Result<Option<Model>> {
     sqlx::query(
         "UPDATE models
-            SET display_name      = coalesce(?2, display_name),
+            SET model_id          = coalesce(?12, model_id),
+                display_name      = coalesce(?2, display_name),
                 context_window    = coalesce(?3, context_window),
                 max_output_tokens = coalesce(?4, max_output_tokens),
                 supports_vision   = coalesce(?5, supports_vision),
@@ -409,6 +414,7 @@ pub async fn update_model(
     .bind(p.pinned)
     .bind(p.sort_order)
     .bind(owner)
+    .bind(p.model_id)
     .execute(db)
     .await?;
     get_model(db, owner, id).await

@@ -48,6 +48,9 @@ pub struct Source {
     pub error_detail: Option<String>,
     /// How far the analyzer has got, as "done/total", while it is working.
     pub progress: Option<String>,
+    /// Finished sections of a long rendition, kept so a restart resumes.
+    #[serde(skip_serializing)]
+    pub partial: Option<String>,
     pub metadata: String,
     pub created_at: String,
     pub updated_at: String,
@@ -265,6 +268,31 @@ pub async fn set_source_progress(
     Ok(())
 }
 
+/// Save the work done so far on a long file, with the page it reached.
+pub async fn save_partial(
+    db: &Db,
+    id: &str,
+    markdown: &str,
+    done: i64,
+    total: i64,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sources SET partial = ?2, progress = ?3 WHERE id = ?1")
+        .bind(id)
+        .bind(markdown)
+        .bind(format!("{done}/{total}"))
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn clear_partial(db: &Db, id: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE sources SET partial = NULL WHERE id = ?1")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Sources waiting for the analyzer, oldest first. Used to pick work back up
 /// after a restart, so nothing is stranded mid-queue.
 pub async fn pending_sources(db: &Db) -> sqlx::Result<Vec<Source>> {
@@ -378,7 +406,11 @@ pub struct SearchHit {
     pub heading: Option<String>,
     pub locator: Option<String>,
     pub ordinal: i64,
+    /// The matched text with markers, for the search UI.
     pub snippet: String,
+    /// The whole chunk. What a model is given: a worked example does not fit
+    /// in a 32 token snippet, and an answer cannot be built from ellipses.
+    pub content: String,
     pub score: f64,
 }
 
@@ -390,6 +422,7 @@ const SEARCH_SQL: &str = "
            c.locator      AS locator,
            c.ordinal      AS ordinal,
            snippet(chunks_fts, 0, '**', '**', ' ... ', 32) AS snippet,
+           c.content      AS content,
            bm25(chunks_fts) AS score
     FROM chunks_fts
     JOIN chunks  c ON c.id = chunks_fts.chunk_id
@@ -431,7 +464,7 @@ pub async fn chunks_for_source(db: &Db, source_id: &str) -> sqlx::Result<Vec<Sea
     sqlx::query_as::<_, SearchHit>(
         "SELECT c.id AS chunk_id, c.source_id AS source_id, s.title AS source_title,
                 c.heading AS heading, c.locator AS locator, c.ordinal AS ordinal,
-                c.content AS snippet, 0.0 AS score
+                c.content AS snippet, c.content AS content, 0.0 AS score
          FROM chunks c JOIN sources s ON s.id = c.source_id
          WHERE c.source_id = ?1 ORDER BY c.ordinal",
     )
@@ -455,6 +488,108 @@ const STOPWORDS: &[&str] = &[
     "what", "whats", "when", "where", "which", "while", "who", "why", "will", "with", "would",
     "you", "your", "depth", "detail", "please", "thanks",
 ];
+
+/// The chunks either side of a hit.
+///
+/// A match often lands on the sentence that names a thing while the worked
+/// example runs on into the next chunk, so a hit is read with its neighbours
+/// rather than alone.
+pub async fn chunks_around(
+    db: &Db,
+    source_id: &str,
+    ordinal: i64,
+    radius: i64,
+) -> sqlx::Result<Vec<SearchHit>> {
+    sqlx::query_as::<_, SearchHit>(
+        "SELECT c.id AS chunk_id, c.source_id AS source_id, s.title AS source_title,
+                c.heading AS heading, c.locator AS locator, c.ordinal AS ordinal,
+                c.content AS snippet, c.content AS content, 0.0 AS score
+           FROM chunks c JOIN sources s ON s.id = c.source_id
+          WHERE c.source_id = ?1 AND c.ordinal BETWEEN ?2 AND ?3
+          ORDER BY c.ordinal",
+    )
+    .bind(source_id)
+    .bind(ordinal - radius)
+    .bind(ordinal + radius)
+    .fetch_all(db)
+    .await
+}
+
+/// A slice of a rendition, by line, with line numbers kept.
+///
+/// Locators are lines of this same text, so "read around line 249" is how a
+/// model follows a citation to the passage it came from.
+pub struct DocumentSlice {
+    pub title: String,
+    pub from_line: usize,
+    pub to_line: usize,
+    pub total_lines: usize,
+    pub text: String,
+}
+
+pub async fn read_document_lines(
+    db: &Db,
+    owner: &str,
+    source_id: &str,
+    from_line: usize,
+    lines: usize,
+    max_chars: usize,
+) -> sqlx::Result<Option<DocumentSlice>> {
+    let Some(source) = get_source(db, source_id).await? else { return Ok(None) };
+    if source.owner_id != owner {
+        return Ok(None);
+    }
+    let Some(doc) = get_document(db, source_id).await? else { return Ok(None) };
+
+    let all: Vec<&str> = doc.markdown.lines().collect();
+    let total_lines = all.len();
+    let start = from_line.saturating_sub(1).min(total_lines);
+    let end = (start + lines.max(1)).min(total_lines);
+
+    let mut text = String::new();
+    for (offset, line) in all[start..end].iter().enumerate() {
+        let numbered = format!("{:>5}  {}\n", start + offset + 1, line);
+        if text.len() + numbered.len() > max_chars {
+            break;
+        }
+        text.push_str(&numbered);
+    }
+
+    Ok(Some(DocumentSlice {
+        title: source.title,
+        from_line: start + 1,
+        to_line: end,
+        total_lines,
+        text,
+    }))
+}
+
+/// Titles and summaries, for a model deciding where to look.
+pub struct SourceBrief {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub status: String,
+    pub summary: Option<String>,
+    pub total_lines: usize,
+}
+
+pub async fn source_briefs(db: &Db, owner: &str) -> sqlx::Result<Vec<SourceBrief>> {
+    let sources = list_sources(db, owner).await?;
+    let mut briefs = Vec::new();
+    for source in sources {
+        let doc = get_document(db, &source.id).await?;
+        briefs.push(SourceBrief {
+            id: source.id,
+            title: source.title,
+            kind: source.kind,
+            status: source.status,
+            summary: doc.as_ref().and_then(|d| d.summary.clone()),
+            total_lines: doc.map(|d| d.markdown.lines().count()).unwrap_or(0),
+        });
+    }
+    Ok(briefs)
+}
 
 /// Turn arbitrary user text into FTS5 terms. Everything is quoted, so operator
 /// characters in a question can never produce a malformed MATCH expression.

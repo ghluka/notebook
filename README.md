@@ -67,6 +67,29 @@ The footer counts the queue down. Analysis runs on the server, so refreshing the
 page or closing the tab does not cancel it, and a restart picks up whatever was
 still queued.
 
+## How an answer is built
+
+A question runs a keyword search, and the researcher is handed whole passages
+with the ones either side of them, sized to the model's context window rather
+than trimmed to a few fragments. From there it can search again with better
+words, read a source around a line, or list what is in the notebook, until it
+can answer. Citations are the passages it used, one chip per file; clicking one
+opens that file at the line it drew on.
+
+## Narrowing a question
+
+By default a question searches every source. Drag files from the explorer into
+the conversation to search only those: they show as attachments above the
+composer and stay there until you remove them or switch conversations.
+
+## Models that are not listed
+
+Most endpoints report their catalogue and it is imported for you. Some do not:
+DeepSeek's Anthropic-style API lists nothing, and preview models are often
+missing from lists that exist. **Add model** in Configure takes the exact wire
+id and the capabilities, and every field of any model can be edited later,
+including the id.
+
 ## When a provider is busy
 
 Rate limits are waited out automatically: 5 seconds, then a minute, then another

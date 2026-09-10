@@ -74,10 +74,11 @@
   .node { display:flex; align-items:center; gap:6px; height:24px; padding:0 8px 0 0;
           font-size:13px; color:var(--dim); white-space:nowrap; cursor:default; }
   .node:hover { background:var(--hover); }
-  /* Selected rows are the retrieval scope, so the whole selection is lit, and
-     the row you clicked last carries the brighter focus. */
-  .node.scoped { background:#33302c; color:var(--fg); }
-  .node.scoped:hover { background:#3a3733; }
+  /* Selection is selection: what an action applies to and what a drag carries.
+     What the researcher reads is decided by attaching files to the
+     conversation, not by what happens to be highlighted here. */
+  .node.selected { background:#33302c; color:var(--fg); }
+  .node.selected:hover { background:#3a3733; }
   .node.sel { background:#3b3a37; color:var(--fg); }
   .node.drop { outline:1px solid var(--accent); outline-offset:-1px; }
   /* What follows the cursor while dragging. Off screen until the browser
@@ -167,8 +168,13 @@
   .meta-line { display:flex; gap:10px; align-items:center; margin-top:10px;
                font-size:12px; color:var(--faint); flex-wrap:wrap; }
   .cite { border:1px solid var(--line); border-radius:999px; padding:2px 9px;
-          background:transparent; color:var(--dim); font-size:12px; }
+          background:transparent; color:var(--dim); font-size:12px;
+          display:inline-flex; align-items:center; gap:6px; }
   .cite:hover { border-color:var(--accent); color:var(--fg); }
+  .cite .count { color:var(--faint); font-size:11px;
+                 font-variant-numeric:tabular-nums; }
+  /* Where a citation lands in the rendition. */
+  .viewer mark { background:#4a3a26; color:var(--fg); border-radius:3px; }
   .turn.note { color:var(--faint); font-size:13px; }
   .turn.note.bad { color:var(--bad); }
   .thinking { color:var(--faint); font-size:13px; }
@@ -198,6 +204,29 @@
   .send.stop { background:transparent; border:1px solid var(--line); color:var(--fg); }
   .send.stop:hover { border-color:var(--accent); }
   .send .sq { width:9px; height:9px; background:currentColor; border-radius:2px; }
+
+  /* Attachments: the files this conversation is asking about. */
+  .attachments { display:flex; flex-wrap:wrap; align-items:center; gap:6px;
+                 margin-bottom:8px; }
+  .attachments[hidden] { display:none; }
+  .attach { display:flex; align-items:center; gap:7px; background:var(--panel);
+            border:1px solid var(--line); border-radius:10px;
+            padding:6px 6px 6px 10px; font-size:13px; color:var(--dim);
+            max-width:260px; }
+  .attach .ico { width:15px; height:15px; flex:none; }
+  .attach span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .attach button { background:transparent; border:0; color:var(--faint);
+                   font-size:14px; line-height:1; padding:2px 5px;
+                   border-radius:5px; flex:none; }
+  .attach button:hover { background:var(--hover); color:var(--fg); }
+  .attach.working { opacity:.6; }
+  .attachments .drop-all { background:transparent; border:0; color:var(--faint);
+                           font-size:12px; padding:4px 6px; border-radius:6px; }
+  .attachments .drop-all:hover { color:var(--fg); background:var(--hover); }
+  /* Where a dragged file lands. */
+  main.drop-target .composer { border-color:var(--accent); }
+  main.drop-target #log { outline:2px dashed #4a453f; outline-offset:-14px;
+                          border-radius:14px; }
 
   .queue { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
   .queue[hidden] { display:none; }
@@ -301,6 +330,16 @@
   .dialog .field input, .dialog .field select { width:100%; }
   .dialog .actions { display:flex; justify-content:flex-end; gap:8px;
                      padding:16px; }
+  .dialog .form { padding:12px 16px 0; display:flex; flex-direction:column; gap:11px; }
+  .dialog .form label { display:flex; flex-direction:column; gap:4px;
+                        font-size:12px; color:var(--faint); }
+  .dialog .form label input[type=text], .dialog .form label input[type=number],
+  .dialog .form label select { width:100%; }
+  .dialog .form .note { font-size:11px; color:var(--faint); }
+  .dialog .form input.bad { border-color:var(--bad); }
+  .dialog .checks { display:flex; flex-wrap:wrap; gap:14px; }
+  .dialog .checks label { flex-direction:row; align-items:center; gap:6px;
+                          font-size:13px; color:var(--fg); }
   .dialog .actions .btn.danger { border-color:#5c3a35; }
   .dialog .actions .btn.danger:hover { background:#3a2724; }
 
@@ -399,8 +438,6 @@
   <div class="rail-foot">
     <div class="rail-progress"><i id="railProgress"></i></div>
     <span id="treeStatus">0 files</span>
-    <span class="spacer" style="flex:1"></span>
-    <button id="clearScope">Clear scope</button>
   </div>
   <input id="file" type="file" multiple hidden>
 </aside>
@@ -408,6 +445,7 @@
 <main>
   <div id="log"><div class="thread" id="thread"></div></div>
   <div class="composer-wrap">
+    <div class="attachments" id="attachments" hidden></div>
     <div class="queue" id="queue" hidden></div>
     <div class="cmds" id="cmds" hidden></div>
     <div class="composer">
@@ -483,6 +521,7 @@
     <div class="toolbar">
       <input type="text" id="modelSearch" class="grow" placeholder="Type to search">
       <select id="providerFilter"><option value="">All providers</option></select>
+      <button class="btn ghost" id="addModelBtn">Add model</button>
       <label class="check"><input type="checkbox" id="showHidden"> Show hidden <span id="hiddenCount"></span></label>
     </div>
     <div class="scroll">
@@ -498,7 +537,8 @@
       <div id="modelEmpty" class="empty" hidden>
         No models yet. <b>Add provider</b> stores your API key for that endpoint and
         imports every model it reports, then you hide the ones you do not want and
-        pin the ones you do.
+        pin the ones you do. Endpoints that list nothing, or that leave preview
+        models out of the list, are covered by <b>Add model</b>.
       </div>
       <div class="hint" style="margin-top:10px">
         Capability tags are clickable. Endpoints that report their own metadata
@@ -553,7 +593,7 @@
 <script>
 const $ = s => document.querySelector(s);
 const state = {
-  sources: [], folders: [], open: new Set(), scope: new Set(),
+  sources: [], folders: [], open: new Set(), selected: new Set(), attached: [],
   selectedNode: null, conversationId: null, viewerSource: null, viewerTab: 'rendition',
   settings: { pinned: [], researcher: null, thinking_effort: 'off' },
   activeModel: null, context: { used: 0, window: 0 },
@@ -639,6 +679,7 @@ async function loadTree() {
     }
   }
 
+  renderAttachments();
   watchAnalysis();
   return data;
 }
@@ -702,7 +743,7 @@ function patchNode(el, row) {
   }
 
   const source = row.source;
-  el.classList.toggle('scoped', state.scope.has(source.id));
+  el.classList.toggle('selected', state.selected.has(source.id));
   el.classList.toggle('sel', state.selectedNode === 's:' + source.id);
   el.classList.toggle('working', isWorking(source));
 
@@ -770,7 +811,6 @@ function nodeTitle(source) {
 function renderTreeStatus() {
   const working = state.sources.filter(s => s.status === 'pending' || s.status === 'analyzing');
   const bar = $('#railProgress');
-  const scoped = state.scope.size;
 
   let lead;
   if (state.uploading) {
@@ -791,14 +831,8 @@ function renderTreeStatus() {
     lead = `${state.sources.length} file${state.sources.length === 1 ? '' : 's'}`;
   }
 
-  // The count rides on the button rather than the status line, which is the
-  // first thing to be trimmed when a long progress string and a button share
-  // 264px.
   $('#treeStatus').textContent = lead;
-  $('#treeStatus').title = scoped ? `${lead}, ${scoped} in scope` : lead;
-  $('#clearScope').textContent = `Clear ${scoped}`;
-  $('#clearScope').title = `${scoped} file${scoped === 1 ? '' : 's'} in scope for the next question`;
-  $('#clearScope').hidden = !scoped;
+  $('#treeStatus').title = lead;
 }
 
 function baseNode(depth) {
@@ -855,7 +889,7 @@ function sourceNode(row) {
   el.append(statusMark(source));
   el.dataset.progress = source.progress || '';
   el.title = nodeTitle(source);
-  if (state.scope.has(source.id)) el.classList.add('scoped');
+  if (state.selected.has(source.id)) el.classList.add('selected');
   if (state.selectedNode === 's:' + source.id) el.classList.add('sel');
 
   el.onclick = e => selectSource(source, e);
@@ -863,7 +897,7 @@ function sourceNode(row) {
   el.oncontextmenu = e => {
     e.preventDefault();
     // Right clicking outside the selection moves the selection there first.
-    if (!state.scope.has(source.id)) selectSource(source, {});
+    if (!state.selected.has(source.id)) selectSource(source, {});
     sourceMenu(e, source);
   };
   el.ondragstart = e => startDrag(e, source);
@@ -872,8 +906,9 @@ function sourceNode(row) {
 }
 
 /* Explorer selection: click picks one, ctrl or cmd adds and removes, shift
-   takes the range from the last click. The selection is the retrieval scope,
-   so picking files here is what narrows the next question. */
+   takes the range from the last click. Selection is what an action applies to
+   and what a drag carries; narrowing a question is done by dragging files into
+   the conversation. */
 function selectSource(source, e = {}) {
   const order = state.rowOrder;
   const additive = e.ctrlKey || e.metaKey;
@@ -881,15 +916,15 @@ function selectSource(source, e = {}) {
   if (e.shiftKey && state.anchorId && order.includes(state.anchorId)) {
     const from = order.indexOf(state.anchorId);
     const to = order.indexOf(source.id);
-    if (!additive) state.scope.clear();
+    if (!additive) state.selected.clear();
     for (const id of order.slice(Math.min(from, to), Math.max(from, to) + 1)) {
-      state.scope.add(id);
+      state.selected.add(id);
     }
   } else if (additive) {
-    state.scope.has(source.id) ? state.scope.delete(source.id) : state.scope.add(source.id);
+    state.selected.has(source.id) ? state.selected.delete(source.id) : state.selected.add(source.id);
     state.anchorId = source.id;
   } else {
-    state.scope = new Set([source.id]);
+    state.selected = new Set([source.id]);
     state.anchorId = source.id;
   }
 
@@ -899,8 +934,8 @@ function selectSource(source, e = {}) {
 
 /* Drag the whole selection, and show what is moving under the cursor. */
 function startDrag(e, source) {
-  if (!state.scope.has(source.id)) selectSource(source, {});
-  state.dragging = [...state.scope];
+  if (!state.selected.has(source.id)) selectSource(source, {});
+  state.dragging = [...state.selected];
 
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', state.dragging.join(','));
@@ -963,11 +998,11 @@ $('#tree').ondrop = e => {
 // Clicking past the last row clears the selection, like any file list.
 $('#tree').addEventListener('mousedown', e => {
   if (e.target !== $('#tree') || e.button !== 0) return;
-  state.scope.clear();
+  state.selected.clear();
   state.selectedNode = null;
   renderTree();
 });
-$('#clearScope').onclick = () => { state.scope.clear(); renderTree(); };
+
 $('#refreshTree').onclick = loadTree;
 $('#newFolderBtn').onclick = () => createFolder(null);
 $('#newFileBtn').onclick = () => $('#file').click();
@@ -987,7 +1022,7 @@ async function createFolder(parentId) {
    nothing like the rest of this. These are the same three shapes, promised. */
 
 function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cancel',
-                  danger = false, input = null, choices = null }) {
+                  danger = false, input = null, choices = null, fields = null }) {
   return new Promise(resolve => {
     const modal = $('#dialog');
     const field = $('#dialogField');
@@ -997,11 +1032,60 @@ function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cance
     $('#dialogMessage').textContent = message;
     $('#dialogMessage').hidden = !message;
     field.innerHTML = '';
-    field.hidden = !(input || choices);
+    field.hidden = !(input || choices || fields);
     actions.innerHTML = '';
 
     let control = null;
-    if (choices) {
+    const controls = {};
+
+    // A multi field form: the same dialog, resolving to an object of values.
+    if (fields) {
+      const form = document.createElement('div');
+      form.className = 'form';
+      for (const f of fields) {
+        if (f.type === 'checkbox') continue;
+        const label = document.createElement('label');
+        label.textContent = f.label;
+        let input;
+        if (f.type === 'select') {
+          input = document.createElement('select');
+          for (const o of f.options) input.append(new Option(o.label, o.value));
+          input.value = f.value ?? '';
+        } else {
+          input = document.createElement('input');
+          input.type = f.type === 'number' ? 'number' : 'text';
+          input.value = f.value ?? '';
+          input.placeholder = f.placeholder || '';
+        }
+        controls[f.key] = input;
+        label.append(input);
+        if (f.hint) {
+          const hint = document.createElement('span');
+          hint.className = 'note';
+          hint.textContent = f.hint;
+          label.append(hint);
+        }
+        form.append(label);
+      }
+
+      const boxes = fields.filter(f => f.type === 'checkbox');
+      if (boxes.length) {
+        const row = document.createElement('div');
+        row.className = 'checks';
+        for (const f of boxes) {
+          const label = document.createElement('label');
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.checked = !!f.value;
+          controls[f.key] = input;
+          label.append(input, document.createTextNode(f.label));
+          row.append(label);
+        }
+        form.append(row);
+      }
+      field.append(form);
+      control = Object.values(controls)[0];
+    } else if (choices) {
       control = document.createElement('select');
       for (const c of choices) control.append(new Option(c.label, c.value));
       field.append(control);
@@ -1021,6 +1105,25 @@ function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cance
     };
 
     const submit = () => {
+      if (fields) {
+        const out = {};
+        for (const f of fields) {
+          const input = controls[f.key];
+          if (f.type === 'checkbox') { out[f.key] = input.checked; continue; }
+          const raw = input.value.trim();
+          if (!raw) {
+            if (f.required) {
+              // Keep the dialog open and point at what is missing.
+              input.classList.add('bad');
+              input.focus();
+              return;
+            }
+            continue;
+          }
+          out[f.key] = f.type === 'number' ? Number(raw) : raw;
+        }
+        return done(out);
+      }
       if (!control) return done(true);
       const value = control.value.trim();
       done(value === '' ? null : value);
@@ -1068,6 +1171,9 @@ const askText = (title, value = '', confirmLabel = 'Save') =>
 const askChoice = (title, message, choices, confirmLabel = 'OK') =>
   dialog({ title, message, choices, confirmLabel });
 
+const askFields = (title, message, fields, confirmLabel = 'Save') =>
+  dialog({ title, message, fields, confirmLabel });
+
 /* ------------------------------------------------------ context menu */
 function showMenu(e, items) {
   // Stop the document handler below from closing the menu we are opening.
@@ -1103,8 +1209,8 @@ function sourceMenu(e, source) {
   const folders = state.folders;
   showMenu(e, [
     { label: 'Open', key: 'dbl click', run: () => openViewer(source) },
-    { label: state.scope.has(source.id) ? 'Remove from selection' : 'Add to selection',
-      run: () => selectSource(source, { ctrlKey: true }) },
+    { label: 'Attach to conversation', key: 'drag',
+      run: () => attachSources(selectionCount(source) > 1 ? [...state.selected] : [source.id]) },
     '-',
     { label: 'Rename', key: 'F2', run: () => renameSource(source) },
     ...(folders.length ? [{ label: 'Move to folder', run: () => moveSource(source) }] : []),
@@ -1116,7 +1222,7 @@ function sourceMenu(e, source) {
     '-',
     { label: selectionCount(source) > 1 ? `Delete ${selectionCount(source)} sources` : 'Delete',
       danger: true,
-      run: () => deleteSources(selectionCount(source) > 1 ? [...state.scope] : [source.id]) },
+      run: () => deleteSources(selectionCount(source) > 1 ? [...state.selected] : [source.id]) },
   ]);
 }
 
@@ -1196,7 +1302,7 @@ async function reanalyze(source, modelId) {
 /* How many files an action on this row applies to: the selection when the row
    is part of it, otherwise just the row. */
 function selectionCount(source) {
-  return state.scope.has(source.id) ? state.scope.size : 1;
+  return state.selected.has(source.id) ? state.selected.size : 1;
 }
 
 async function deleteSources(ids) {
@@ -1211,7 +1317,7 @@ async function deleteSources(ids) {
 
   for (const id of ids) {
     await api('/api/sources/' + id, { method: 'DELETE' });
-    state.scope.delete(id);
+    state.selected.delete(id);
     if (state.viewerSource?.id === id) closeViewer();
   }
   loadTree();
@@ -1274,10 +1380,14 @@ async function upload(files, folderId) {
 }
 
 /* ------------------------------------------------------------ viewer */
-async function openViewer(source) {
+async function openViewer(source, locator = null) {
   state.viewerSource = source;
-  state.viewerTab = source.kind === 'text' ? 'rendition'
-                  : (source.kind === 'image' || source.kind === 'pdf') ? 'original' : 'details';
+  state.viewerLocator = locator;
+  // A citation is a place in the rendition, so that is the tab to land on.
+  state.viewerTab = locator ? 'rendition'
+                  : source.kind === 'text' ? 'rendition'
+                  : (source.kind === 'image' || source.kind === 'pdf') ? 'original'
+                  : 'details';
   document.body.classList.add('with-viewer');
   $('#viewer').hidden = false;
   $('#viewerTitle').textContent = source.title;
@@ -1340,6 +1450,21 @@ async function renderViewer() {
       wrap.innerHTML =
         `<div class="facts" style="margin-bottom:10px">${doc.chunks.length} chunks indexed</div>`;
       const pre = document.createElement('pre');
+
+      // "line 249" points at a line of this rendition, so mark it and scroll
+      // there rather than dropping the reader at the top of a long file.
+      const wanted = Number((state.viewerLocator || '').match(/(\d+)/)?.[1]);
+      const lines = doc.document.markdown.split('\n');
+      if (wanted && wanted <= lines.length) {
+        pre.append(document.createTextNode(lines.slice(0, wanted - 1).join('\n') + '\n'));
+        const hit = document.createElement('mark');
+        hit.textContent = lines[wanted - 1];
+        pre.append(hit, document.createTextNode('\n' + lines.slice(wanted).join('\n')));
+        wrap.append(pre);
+        body.append(wrap);
+        hit.scrollIntoView({ block: 'center' });
+        return;
+      }
       pre.textContent = doc.document.markdown;
       wrap.append(pre);
       body.append(wrap);
@@ -1395,7 +1520,29 @@ const SYMBOL = {
   perp:'⊥', parallel:'∥', langle:'⟨', rangle:'⟩',
   hbar:'ℏ', ell:'ℓ', Re:'ℜ', Im:'ℑ', aleph:'ℵ',
   star:'⋆', ast:'∗', oplus:'⊕', otimes:'⊗',
+  // Divisibility and set relations turn up constantly in number theory notes.
+  mid:'∣', nmid:'∤', nparallel:'∦', setminus:'∖', supset:'⊃', supseteq:'⊇',
+  subsetneq:'⊊', supsetneq:'⊋', ncong:'≇', doteq:'≐', asymp:'≍',
+  implies:'⟹', impliedby:'⟸', iff:'⟺', therefore:'∴', because:'∵',
+  vdash:'⊢', models:'⊨', varnothing:'∅', triangle:'△', square:'□',
+  longmapsto:'⟼', hookrightarrow:'↪', uparrow:'↑', downarrow:'↓',
+  leftrightarrow:'↔', Leftrightarrow:'⇔', nearrow:'↗', searrow:'↘',
+  lfloor:'⌊', rfloor:'⌋', lceil:'⌈', rceil:'⌉', wedge:'∧', vee:'∨',
+  bullet:'∙', dagger:'†', colon:':', sqrtsign:'√', surd:'√',
 };
+
+/// Commands that change layout rather than content, and have nothing to say
+/// in MathML.
+const IGNORED = ['displaystyle', 'textstyle', 'scriptstyle', 'limits', 'nolimits',
+                 'nonumber', 'notag', 'allowbreak', 'noalign', 'smallskip',
+                 'medskip', 'bigskip', 'left.', 'right.',
+                 // Delimiter sizing: MathML stretches fences on its own.
+                 'big', 'Big', 'bigg', 'Bigg', 'bigl', 'Bigl', 'biggl', 'Biggl',
+                 'bigr', 'Bigr', 'biggr', 'Biggr', 'bigm', 'Bigm', 'mathstrut',
+                 'strut', 'protect', 'relax'];
+/// Commands whose one argument is discarded.
+const DISCARDS_ARGUMENT = ['label', 'tag', 'ref', 'eqref', 'intertext', 'hspace',
+                           'vspace'];
 
 const BIG_OPS = {
   sum:'∑', prod:'∏', coprod:'∐', int:'∫', iint:'∬',
@@ -1425,7 +1572,7 @@ function texTokens(src) {
       if (!m) return null;
       out.push({ t: 'cmd', v: m[1] });
       i += m[0].length;
-    } else if ('{}^_'.includes(c)) {
+    } else if ('{}^_&'.includes(c)) {
       out.push({ t: c });
       i++;
     } else if (/\s/.test(c)) {
@@ -1444,6 +1591,25 @@ function texTokens(src) {
 
 /* Returns a MathML string, or null when the input uses something outside the
    subset. Null is the signal to show the source instead. */
+/* Which environments are understood, and how their columns line up. TeX
+   aligns the odd columns of `align` right and the even ones left, which is what
+   puts the equals signs under each other. */
+const ENVIRONMENTS = {
+  'align': 'align', 'align*': 'align', 'aligned': 'align', 'alignat': 'align',
+  'alignat*': 'align', 'split': 'align', 'eqnarray': 'align', 'eqnarray*': 'align',
+  'gather': 'center', 'gather*': 'center', 'gathered': 'center',
+  'multline': 'center', 'multline*': 'center',
+  'equation': 'center', 'equation*': 'center',
+  'cases': 'cases', 'array': 'left',
+  'matrix': 'matrix', 'pmatrix': 'matrix', 'bmatrix': 'matrix',
+  'Bmatrix': 'matrix', 'vmatrix': 'matrix', 'Vmatrix': 'matrix', 'smallmatrix': 'matrix',
+};
+
+const FENCES = {
+  pmatrix: ['(', ')'], bmatrix: ['[', ']'], Bmatrix: ['{', '}'],
+  vmatrix: ['|', '|'], Vmatrix: ['\u2016', '\u2016'], cases: ['{', ''],
+};
+
 function texToMathml(tex, display) {
   const tokens = texTokens(tex);
   if (!tokens || !tokens.length) return null;
@@ -1529,7 +1695,116 @@ function texToMathml(tex, display) {
       return { html: '<mo stretchy="true">' + esc(glyph) + '</mo>' };
     }
     if (name === '{' || name === '}') return { html: '<mo>' + name + '</mo>' };
+    if (IGNORED.includes(name)) return { html: '' };
+    if (DISCARDS_ARGUMENT.includes(name)) {
+      if (textArgument() === null) return { html: fail() };
+      return { html: '' };
+    }
+    // "mod" as an operator, and the parenthesised form used in congruences.
+    if (name === 'bmod') return { html: '<mo lspace="0.28em" rspace="0.28em">mod</mo>' };
+    if (name === 'pmod') {
+      const arg = argument();
+      return {
+        html: '<mrow><mspace width="0.44em"/><mo>(</mo><mtext>mod</mtext>' +
+              '<mspace width="0.28em"/>' + arg + '<mo>)</mo></mrow>',
+      };
+    }
+    if (name === 'binom' || name === 'dbinom' || name === 'tbinom') {
+      const top = argument(), bottom = argument();
+      return {
+        html: '<mrow><mo>(</mo><mfrac linethickness="0">' + top + bottom +
+              '</mfrac><mo>)</mo></mrow>',
+      };
+    }
+    if (name === 'overbrace' || name === 'underbrace') {
+      const arg = argument();
+      const brace = name === 'overbrace' ? '&#9182;' : '&#9183;';
+      return name === 'overbrace'
+        ? { html: '<mover accent="true">' + arg + '<mo>' + brace + '</mo></mover>' }
+        : { html: '<munder accentunder="true">' + arg + '<mo>' + brace + '</mo></munder>' };
+    }
+    if (name === 'boxed' || name === 'mathop' || name === 'mathrel'
+        || name === 'mathbin') {
+      return { html: '<mrow>' + argument() + '</mrow>' };
+    }
+    if (name === 'phantom') {
+      argument();
+      return { html: '<mspace width="0.5em"/>' };
+    }
+    if (name === 'underline') {
+      return { html: '<munder accentunder="true">' + argument() + '<mo>&#95;</mo></munder>' };
+    }
+    if (name === 'begin') {
+      const env = textArgument();
+      if (env === null || !(env in ENVIRONMENTS)) return { html: fail() };
+      // `array` carries a column spec that MathML does not need.
+      if (env === 'array' && tokens[i] && tokens[i].t === '{') textArgument();
+      return { html: environment(env) };
+    }
+    // A row break or an `end` outside an environment is nothing to lay out.
+    if (name === 'end' || name === '\\') return { html: fail() };
+
+    /* Anything else is a macro this converter has never heard of. If it takes
+       no argument, its name is a reasonable rendering and the rest of the
+       formula survives; one unknown symbol should not send a whole derivation
+       back to raw source. A macro with arguments is a different matter, since
+       guessing its layout would be inventing mathematics. */
+    if (/^[a-zA-Z]+$/.test(name) && !(tokens[i] && tokens[i].t === '{')) {
+      return { html: '<mi mathvariant="normal">' + esc(name) + '</mi>' };
+    }
     return null;
+  }
+
+  /* Rows of cells until the matching \end: cells split on `&`, rows on `\\`,
+     which is exactly how the source reads. */
+  function environment(env) {
+    const rows = [];
+    let row = [];
+    let cell = '';
+    const endCell = () => { row.push(cell); cell = ''; };
+    const endRow = () => { endCell(); rows.push(row); row = []; };
+
+    while (i < tokens.length) {
+      const tk = tokens[i];
+
+      if (tk.t === 'cmd' && tk.v === 'end') {
+        i++;
+        if (textArgument() !== env) return fail();
+        endRow();
+        return buildTable(env, rows);
+      }
+      if (tk.t === 'cmd' && tk.v === '\\') { i++; endRow(); continue; }
+      if (tk.t === '&') { i++; endCell(); continue; }
+
+      const piece = scripted();
+      if (piece == null || failed) return fail();
+      cell += piece;
+    }
+    return fail();
+  }
+
+  function buildTable(env, rows) {
+    const shape = ENVIRONMENTS[env];
+    const alignOf = index => {
+      if (shape === 'align') return index % 2 === 0 ? 'right' : 'left';
+      if (shape === 'cases' || shape === 'left') return 'left';
+      return 'center';
+    };
+
+    const body = rows
+      .filter(cells => cells.some(c => c.trim() !== ''))
+      .map(cells => '<mtr>' + cells
+        .map((c, index) =>
+          '<mtd columnalign="' + alignOf(index) + '"><mrow>' + c + '</mrow></mtd>')
+        .join('') + '</mtr>')
+      .join('');
+    if (!body) return fail();
+
+    const table = '<mtable displaystyle="true">' + body + '</mtable>';
+    const fence = FENCES[env];
+    if (!fence) return table;
+    return '<mrow><mo stretchy="true">' + fence[0] + '</mo>' + table +
+           (fence[1] ? '<mo stretchy="true">' + fence[1] + '</mo>' : '') + '</mrow>';
   }
 
   function atom() {
@@ -1620,12 +1895,17 @@ function markdown(src) {
                    : '<span class="math-src">' + esc(tex.trim()) + '</span>';
   };
 
+  // Models often emit an environment with no delimiters around it at all,
+  // and it is still mathematics.
+  const BARE_ENV = /\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}/g;
+
   text = text
     .replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => hold(renderMath(tex, true)))
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, tex) => hold(renderMath(tex, true)))
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, tex) => hold(renderMath(tex, false)))
     // Inline needs non-space at both ends, so prices stay prices.
-    .replace(/\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, tex) => hold(renderMath(tex, false)));
+    .replace(/\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, tex) => hold(renderMath(tex, false)))
+    .replace(BARE_ENV, m => hold(renderMath(m, true)));
 
   const inline = s => esc(s)
     .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -1674,13 +1954,96 @@ function markdown(src) {
   return out.join('').replace(/(\d+)/g, (_, n) => held[+n]);
 }
 
+/* --------------------------------------------------- attachments */
+/* Files the conversation is about. Dragged in from the explorer, they stay
+   until removed, so a line of questioning keeps its focus without the explorer
+   having to double as a scope control. */
+
+function attachSources(ids) {
+  const added = ids.filter(id => !state.attached.includes(id) &&
+                                 state.sources.some(s => s.id === id));
+  if (!added.length) return;
+  state.attached.push(...added);
+  renderAttachments();
+}
+
+function detachSource(id) {
+  state.attached = state.attached.filter(x => x !== id);
+  renderAttachments();
+}
+
+function renderAttachments() {
+  const box = $('#attachments');
+  // A source can be deleted while attached.
+  state.attached = state.attached.filter(id => state.sources.some(s => s.id === id));
+  box.innerHTML = '';
+  box.hidden = !state.attached.length;
+  if (box.hidden) return;
+
+  for (const id of state.attached) {
+    const source = state.sources.find(s => s.id === id);
+    const chip = document.createElement('div');
+    chip.className = 'attach' + (isWorking(source) ? ' working' : '');
+    chip.title = isWorking(source)
+      ? `${source.title} is still being analyzed, so it has nothing to search yet`
+      : source.title;
+    chip.innerHTML = iconSvg(source.kind, source.original_filename) +
+                     `<span>${esc(source.title)}</span>`;
+    const drop = document.createElement('button');
+    drop.textContent = '\u00d7';
+    drop.title = 'Remove from this conversation';
+    drop.onclick = () => detachSource(id);
+    chip.append(drop);
+    box.append(chip);
+  }
+
+  if (state.attached.length > 1) {
+    const all = document.createElement('button');
+    all.className = 'drop-all';
+    all.textContent = 'remove all';
+    all.onclick = () => { state.attached = []; renderAttachments(); };
+    box.append(all);
+  }
+}
+
+/* The conversation is the drop target. Files from the explorer become
+   attachments; files from the desktop are uploaded, as they always were. */
+const chatPane = document.querySelector('main');
+
+chatPane.addEventListener('dragover', e => {
+  const files = e.dataTransfer?.types?.includes('Files');
+  if (!state.dragging?.length && !files) return;
+  e.preventDefault();
+  chatPane.classList.add('drop-target');
+});
+
+chatPane.addEventListener('dragleave', e => {
+  if (!chatPane.contains(e.relatedTarget)) chatPane.classList.remove('drop-target');
+});
+
+chatPane.addEventListener('drop', e => {
+  chatPane.classList.remove('drop-target');
+  if (state.dragging?.length) {
+    e.preventDefault();
+    e.stopPropagation();
+    attachSources(state.dragging);
+    state.dragging = null;
+    stopDragScroll();
+    return;
+  }
+  if (e.dataTransfer?.files?.length) {
+    // Uploading is handled once, by the document level handler.
+    return;
+  }
+});
+
 /* --------------------------------------------------------------- chat */
 function emptyState() {
   if ($('#thread').children.length) return;
   const el = document.createElement('div');
   el.className = 'empty-chat';
   el.textContent = state.sources.length
-    ? 'Ask a question. Click files in the explorer to narrow the search to them.'
+    ? 'Ask a question. Drag files in from the explorer to search only those.'
     : 'Add a source to get started.';
   el.id = 'emptyChat';
   $('#thread').append(el);
@@ -1731,11 +2094,28 @@ function note(text, bad) {
   el.scrollIntoView({ block: 'end' });
 }
 
+/* The model has to mark its claims, since that is how the server knows which
+   excerpts it actually used, but the marks are noise to read: the chips below
+   the answer say the same thing. So they come out at render time, leaving the
+   stored answer intact. */
+const CITED_FILE = /\s*\[[^\]\n]*\.(?:pdf|md|markdown|txt|csv|json|docx?|pptx?|png|jpe?g|webp|gif|mp[34]|wav|mov)[^\]\n]*\](?!\()/gi;
+
+function stripCitations(text, citations = []) {
+  let out = text;
+  for (const c of citations) {
+    if (!c.label) continue;
+    // Exact labels first, so nothing depends on the shape of a file name.
+    out = out.split(c.label).join('');
+  }
+  return out.replace(CITED_FILE, '').replace(/[ \t]+([.,;:])/g, '$1');
+}
+
 function finishTurn(el, res) {
   const seconds = el.elapsed ? el.elapsed() : 0;
   stopTimer(el);
   el.querySelector('.thinking')?.remove();
-  el.querySelector('.body').innerHTML = markdown(res.answer || '');
+  el.querySelector('.body').innerHTML =
+    markdown(stripCitations(res.answer || '', res.citations));
 
   const meta = document.createElement('div');
   meta.className = 'meta-line';
@@ -1744,17 +2124,40 @@ function finishTurn(el, res) {
   // search happened and none of it was cited.
   const searched = res.excerpts_searched && !(res.citations || []).length
     ? `, ${res.excerpts_searched} excerpts searched` : '';
+  // What it did to get here, when it did more than read what it was handed.
+  const tools = (res.tool_calls || []).length
+    ? ', ' + res.tool_calls.slice(0, 3).join(', ') : '';
   model.textContent = res.model_display_name +
     (res.effort && res.effort !== 'off' ? `, ${res.effort} effort` : '') +
-    (seconds ? `, ${seconds}s` : '') + searched;
+    (seconds ? `, ${seconds}s` : '') + tools + searched;
   meta.append(model);
+  // One chip per file, not per excerpt: the lines it drew on are on the
+  // tooltip, and clicking opens the file at the first of them.
+  const byFile = new Map();
   for (const c of res.citations || []) {
+    const entry = byFile.get(c.source_id) ||
+                  { title: c.source_title, id: c.source_id, locators: [] };
+    if (c.locator && !entry.locators.includes(c.locator)) entry.locators.push(c.locator);
+    byFile.set(c.source_id, entry);
+  }
+
+  for (const file of byFile.values()) {
     const b = document.createElement('button');
     b.className = 'cite';
-    b.textContent = `${c.source_title}${c.locator ? ' ' + c.locator : ''}`;
+    b.innerHTML = '<span></span>';
+    b.children[0].textContent = file.title;
+    if (file.locators.length > 1) {
+      const count = document.createElement('span');
+      count.className = 'count';
+      count.textContent = file.locators.length;
+      b.append(count);
+    }
+    b.title = file.locators.length
+      ? `Drawn from ${file.locators.join(', ')}. Click to open.`
+      : 'Click to open.';
     b.onclick = () => {
-      const source = state.sources.find(s => s.id === c.source_id);
-      if (source) openViewer(source);
+      const source = state.sources.find(s => s.id === file.id);
+      if (source) openViewer(source, file.locators[0]);
     };
     meta.append(b);
   }
@@ -1880,7 +2283,7 @@ async function runTurn(text) {
       json: {
         message: text,
         conversation_id: state.conversationId,
-        source_ids: [...state.scope],
+        source_ids: [...state.attached],
         model_id: state.activeModel?.id || null,
       },
     });
@@ -2020,6 +2423,8 @@ async function deleteConversation(chat) {
 
 function newConversation({ fromHistory = false } = {}) {
   state.conversationId = null;
+  state.attached = [];
+  renderAttachments();
   state.context = { used: 0, window: state.activeModel?.context_window || 0 };
   localStorage.removeItem(LAST_CHAT_KEY);
   if (!fromHistory) setUrl(null);
@@ -2045,6 +2450,8 @@ async function openConversation(id, { fromHistory = false } = {}) {
   }
 
   state.conversationId = id;
+  state.attached = [];
+  renderAttachments();
   localStorage.setItem(LAST_CHAT_KEY, id);
   if (!fromHistory) setUrl(id);
   $('#thread').innerHTML = '';
@@ -2271,6 +2678,7 @@ async function loadSettings() {
 function openConfigure() { $('#configure').hidden = false; loadConfigure(); }
 $('#closeConfig').onclick = () => { $('#configure').hidden = true; loadSettings(); };
 $('#modelSearch').oninput = renderModelTable;
+$('#addModelBtn').onclick = () => addModelDialog($('#providerFilter').value || null);
 $('#providerFilter').onchange = loadConfigure;
 $('#showHidden').onchange = loadConfigure;
 
@@ -2368,6 +2776,7 @@ function renderModelTable() {
     const actions = document.createElement('td');
     actions.className = 'actions';
     actions.append(
+      mkBtn('Edit', 'btn ghost sm', () => editModelDialog(m)),
       mkBtn(m.pinned ? 'Unpin' : 'Pin', 'btn ghost sm', () => patchModel(m.id, { pinned: !m.pinned })),
       mkBtn(m.hidden ? 'Show' : 'Hide', 'btn ghost sm', () => patchModel(m.id, { hidden: !m.hidden })),
       mkBtn('Remove', 'btn danger sm', async () => {
@@ -2377,6 +2786,83 @@ function renderModelTable() {
     );
     tr.append(actions);
     rows.append(tr);
+  }
+}
+
+/* Endpoints that list nothing (DeepSeek's Anthropic-style API lists no models
+   at all, and preview ids are often missing from the ones that do) still have
+   to be usable, so a model can be typed in and corrected by hand. */
+function modelFields(model) {
+  const providers = state.providers.map(p => ({ value: p.id, label: p.name }));
+  const fields = [];
+
+  if (!model) {
+    fields.push({
+      key: 'provider_id', label: 'Provider', type: 'select',
+      options: providers, value: providers[0]?.value,
+    });
+  }
+  fields.push(
+    { key: 'model_id', label: 'Model id', type: 'text', required: true,
+      value: model?.model_id, placeholder: 'deepseek-v4-flash-vision-exp',
+      hint: 'exactly as the endpoint expects it' },
+    { key: 'display_name', label: 'Name', type: 'text',
+      value: model?.display_name, placeholder: 'optional, defaults to the id' },
+    { key: 'context_window', label: 'Context size', type: 'number',
+      value: model?.context_window || '', placeholder: 'tokens, blank to guess' },
+    { key: 'max_output_tokens', label: 'Max output', type: 'number',
+      value: model?.max_output_tokens || '', placeholder: 'tokens, blank to guess' },
+    { key: 'supports_vision', label: 'Vision', type: 'checkbox',
+      value: model ? model.supports_vision : false },
+    { key: 'supports_tools', label: 'Tools', type: 'checkbox',
+      value: model ? model.supports_tools : true },
+    { key: 'supports_thinking', label: 'Thinking', type: 'checkbox',
+      value: model ? model.supports_thinking : false },
+  );
+  return fields;
+}
+
+async function addModelDialog(providerId) {
+  if (!state.providers.length) {
+    return say('Add a provider first: a model belongs to an endpoint.', 'No providers');
+  }
+  const fields = modelFields(null);
+  if (providerId) fields[0].value = providerId;
+
+  const values = await askFields(
+    'Add model',
+    'For endpoints that do not list their models, or list them late.',
+    fields, 'Add model');
+  if (!values) return;
+
+  try {
+    await api('/api/models', { method: 'POST', json: { ...values, pinned: true } });
+    loadConfigure();
+  } catch (e) {
+    say(e.message, 'Could not add that model');
+  }
+}
+
+async function editModelDialog(model) {
+  const values = await askFields(`Edit ${model.display_name}`, '', modelFields(model));
+  if (!values) return;
+
+  // Blank numbers mean "leave it alone", so absent keys are sent as they are.
+  const patch = {
+    model_id: values.model_id,
+    display_name: values.display_name || model.model_id,
+    supports_vision: values.supports_vision,
+    supports_tools: values.supports_tools,
+    supports_thinking: values.supports_thinking,
+  };
+  if (values.context_window) patch.context_window = values.context_window;
+  if (values.max_output_tokens) patch.max_output_tokens = values.max_output_tokens;
+
+  try {
+    await api('/api/models/' + model.id, { method: 'PATCH', json: patch });
+    loadConfigure();
+  } catch (e) {
+    say(e.message, 'Could not save that model');
   }
 }
 
@@ -2409,6 +2895,7 @@ function renderProviderTable() {
           say(err.message, 'Could not read that endpoint');
         }
       }),
+      mkBtn('Add model', 'btn ghost sm', () => addModelDialog(p.id)),
       mkBtn('Edit', 'btn ghost sm', () => openProviderForm(null, p)),
       mkBtn('Remove', 'btn danger sm', async () => {
         if (!await ask('Remove provider',
@@ -2482,9 +2969,15 @@ $('#pfSave').onclick = async () => {
     } else {
       const res = await api('/api/providers', { method: 'POST', json: payload });
       await loadConfigure();
-      if (res.import_error) {
+      if (res.import_error || !res.imported) {
         hint.className = 'hint bad';
-        hint.textContent = `Provider saved, but its model list failed: ${res.import_error}`;
+        hint.textContent = res.import_error
+          ? `Provider saved, but its model list failed: ${res.import_error}. Add a model by hand instead.`
+          : 'Provider saved, but it lists no models. Add one by hand with its exact id.';
+        setTimeout(() => {
+          $('#providerForm').hidden = true;
+          addModelDialog(res.provider.id);
+        }, 900);
       } else {
         $('#providerForm').hidden = true;
         note(`${payload.name}: imported ${res.imported} models`);
