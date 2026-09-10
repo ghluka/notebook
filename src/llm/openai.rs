@@ -49,11 +49,21 @@ impl OpenAiProvider {
                     "type": "video_url",
                     "video_url": { "url": format!("data:{media_type};base64,{data}") }
                 })),
-                ContentPart::ToolUse { id, name, input } => tool_calls.push(json!({
-                    "id": id,
-                    "type": "function",
-                    "function": { "name": name, "arguments": input.to_string() }
-                })),
+                ContentPart::ToolUse { id, name, input, signature } => {
+                    let mut call = json!({
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": input.to_string() }
+                    });
+                    // Gemini rejects a history whose function calls come back
+                    // unsigned ("missing a thought_signature"), so whatever it
+                    // signed the call with goes back exactly where it came from.
+                    if let Some(signature) = signature {
+                        call["extra_content"] =
+                            json!({ "google": { "thought_signature": signature } });
+                    }
+                    tool_calls.push(call);
+                }
                 ContentPart::ToolResult { tool_use_id, content, .. } => out.push(json!({
                     "role": "tool",
                     "tool_call_id": tool_use_id,
@@ -167,6 +177,7 @@ impl LlmProvider for OpenAiProvider {
                             .as_str()
                             .and_then(|s| serde_json::from_str(s).ok())
                             .unwrap_or(Value::Null),
+                        signature: thought_signature(c),
                     })
                     .collect()
             })
@@ -283,6 +294,10 @@ fn pump_openai_record(
 #[derive(Debug, Default)]
 struct OpenAiStreamState {
     tools: std::collections::BTreeMap<u64, OpenAiToolBuilder>,
+    /// Where the next call without an `index` goes. Gemini's compatibility
+    /// endpoint omits the field and sends each call whole in one chunk, so
+    /// without this every parallel call would pile into slot 0.
+    next_slot: u64,
     input_tokens: u32,
     output_tokens: u32,
 }
@@ -292,6 +307,34 @@ struct OpenAiToolBuilder {
     id: String,
     name: String,
     arguments: String,
+    signature: Option<String>,
+}
+
+/// Gemini hangs its per-call thought signature off the tool call itself. The
+/// nesting under `function` has been seen in the wild too, so look in both.
+fn thought_signature(call: &Value) -> Option<String> {
+    for place in [&call["extra_content"], &call["function"]["extra_content"]] {
+        if let Some(sig) = place["google"]["thought_signature"].as_str() {
+            return Some(sig.to_string());
+        }
+    }
+    None
+}
+
+/// The slot a streamed fragment belongs to. An explicit `index` wins; without
+/// one, a fragment that names a function starts a new call and anything else
+/// continues the call in flight.
+fn tool_slot(state: &mut OpenAiStreamState, tc: &Value) -> u64 {
+    if let Some(index) = tc["index"].as_u64() {
+        state.next_slot = state.next_slot.max(index + 1);
+        return index;
+    }
+    if tc["function"]["name"].is_string() || tc["id"].is_string() {
+        let slot = state.next_slot;
+        state.next_slot += 1;
+        return slot;
+    }
+    state.next_slot.saturating_sub(1)
 }
 
 /// Fold one SSE record into text, tool fragments and usage. `[DONE]` closes
@@ -309,6 +352,7 @@ fn feed_openai_record(
                 name: b.name.clone(),
                 // Arguments arrive as JSON *string* fragments, same as chat().
                 arguments: serde_json::from_str(&b.arguments).unwrap_or(Value::Null),
+                signature: b.signature.clone(),
             })
             .collect();
         return Ok(Some(StreamEvent::Done(StreamDone {
@@ -326,8 +370,9 @@ fn feed_openai_record(
     }
     let delta = &v["choices"][0]["delta"];
     for tc in delta["tool_calls"].as_array().cloned().unwrap_or_default() {
-        let index = tc["index"].as_u64().unwrap_or(0);
-        let builder = state.tools.entry(index).or_default();
+        let signature = thought_signature(&tc);
+        let slot = tool_slot(state, &tc);
+        let builder = state.tools.entry(slot).or_default();
         if let Some(id) = tc["id"].as_str() {
             builder.id = id.to_string();
         }
@@ -336,6 +381,9 @@ fn feed_openai_record(
         }
         if let Some(args) = tc["function"]["arguments"].as_str() {
             builder.arguments.push_str(args);
+        }
+        if signature.is_some() {
+            builder.signature = signature;
         }
     }
     match delta["content"].as_str() {
@@ -398,6 +446,58 @@ mod tests {
             }
             other => panic!("expected Done, got {other:?}"),
         }
+    }
+
+    /// Gemini streams each call complete in one chunk, with a signature and
+    /// no `index`. Two of them are two calls, not one call twice.
+    #[test]
+    fn keeps_gemini_signatures_and_separates_unindexed_calls() {
+        let mut state = OpenAiStreamState::default();
+        for data in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"search_sources","arguments":"{\"query\":\"a\"}"},"extra_content":{"google":{"thought_signature":"sig-one"}}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"id":"c2","function":{"name":"read_source","arguments":"{\"title\":\"b\"}"}}]}}]}"#,
+        ] {
+            assert!(feed_openai_record(&mut state, &record(data)).unwrap().is_none());
+        }
+        match feed_openai_record(&mut state, &record("[DONE]")).unwrap() {
+            Some(StreamEvent::Done(d)) => {
+                assert_eq!(d.tool_calls.len(), 2);
+                assert_eq!(d.tool_calls[0].arguments["query"], "a");
+                assert_eq!(d.tool_calls[0].signature.as_deref(), Some("sig-one"));
+                assert_eq!(d.tool_calls[1].arguments["title"], "b");
+                assert!(d.tool_calls[1].signature.is_none());
+            }
+            other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    /// The signature has to leave the way it arrived, or the next request is a
+    /// 400 naming the call it belongs to.
+    #[test]
+    fn signed_calls_go_back_signed() {
+        let history = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentPart::ToolUse {
+                    id: "c1".into(),
+                    name: "search_sources".into(),
+                    input: json!({ "query": "a" }),
+                    signature: Some("sig-one".into()),
+                },
+                ContentPart::ToolUse {
+                    id: "c2".into(),
+                    name: "read_source".into(),
+                    input: json!({ "title": "b" }),
+                    signature: None,
+                },
+            ],
+        }];
+        let body = OpenAiProvider::build_body(&ChatRequest::new("gemini", history)).unwrap();
+        let calls = &body["messages"][0]["tool_calls"];
+
+        assert_eq!(calls[0]["extra_content"]["google"]["thought_signature"], "sig-one");
+        // An unsigned call stays clean, so plain OpenAI endpoints see no change.
+        assert!(calls[1].get("extra_content").is_none());
     }
 
     #[test]

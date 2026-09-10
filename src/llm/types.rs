@@ -54,6 +54,11 @@ pub enum ContentPart {
         id: String,
         name: String,
         input: serde_json::Value,
+        /// Opaque provider state that has to travel back with the call.
+        /// Gemini's thinking models sign every function call and reject a
+        /// history that hands one back without its signature.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
     },
     /// Our answer to a `ToolUse`.
     ToolResult {
@@ -116,6 +121,10 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
+    /// See `ContentPart::ToolUse::signature`. `None` for providers that don't
+    /// sign their calls, which is all of them but Gemini.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// How hard the model should think before answering. Mapped per provider:
@@ -242,6 +251,7 @@ impl ChatResponse {
                 id: call.id.clone(),
                 name: call.name.clone(),
                 input: call.arguments.clone(),
+                signature: call.signature.clone(),
             });
         }
         Message { role: Role::Assistant, content }

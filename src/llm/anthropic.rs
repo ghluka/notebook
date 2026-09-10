@@ -45,7 +45,7 @@ impl AnthropicProvider {
                         .into(),
                 ));
             }
-            ContentPart::ToolUse { id, name, input } => json!({
+            ContentPart::ToolUse { id, name, input, .. } => json!({
                 "type": "tool_use", "id": id, "name": name, "input": input
             }),
             ContentPart::ToolResult { tool_use_id, content, is_error } => json!({
@@ -164,6 +164,7 @@ impl LlmProvider for AnthropicProvider {
                     id: block["id"].as_str().unwrap_or_default().to_string(),
                     name: block["name"].as_str().unwrap_or_default().to_string(),
                     arguments: block["input"].clone(),
+                    signature: None,
                 }),
                 _ => {}
             }
@@ -331,6 +332,7 @@ fn feed_anthropic_record(
                     name: b.name.clone(),
                     // Same leniency as chat(): broken JSON becomes Null.
                     arguments: serde_json::from_str(&b.input).unwrap_or(Value::Null),
+                    signature: None,
                 })
                 .collect();
             Ok(Some(StreamEvent::Done(StreamDone {

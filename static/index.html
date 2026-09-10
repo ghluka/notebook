@@ -197,7 +197,8 @@
   .msg-actions .when { color:var(--faint); padding:0 5px; white-space:nowrap; }
   /* Where a citation lands in the rendition. */
   .viewer mark { background:#4a3a26; color:var(--fg); border-radius:3px; }
-  .turn.note { color:var(--faint); font-size:13px; }
+  .turn.note { color:var(--faint); font-size:13px;
+               display:flex; align-items:center; gap:4px; }
   .turn.note.bad { color:var(--bad); }
   .thinking { color:var(--faint); font-size:13px; }
   /* Tool progress while a streamed turn runs; cleared when it finishes, since
@@ -2114,13 +2115,28 @@ function stopTimer(el) {
   el.timer = null;
 }
 
-function note(text, bad) {
+/* A line in the thread for something that happened outside an answer. When
+   the thing that failed can be tried again, `retry` puts the same button under
+   the pointer that a finished answer has: a turn that died halfway is the one
+   you most want to redo, and it is the one that had nowhere to redo from. */
+function note(text, bad, retry) {
   clearEmpty();
   const el = document.createElement('div');
   el.className = 'turn note' + (bad ? ' bad' : '');
-  el.textContent = text;
+  const line = document.createElement('span');
+  line.textContent = text;
+  el.append(line);
+  if (retry) {
+    const box = document.createElement('div');
+    box.className = 'msg-actions';
+    const again = actionButton('retry', 'Ask this question again');
+    again.onclick = () => retry(el);
+    box.append(again);
+    el.append(box);
+  }
   $('#thread').append(el);
   el.scrollIntoView({ block: 'end' });
+  return el;
 }
 
 /* The model has to mark its claims, since that is how the server knows which
@@ -2621,7 +2637,15 @@ async function runTurn(text) {
   const fail = e => {
     stopTimer(turn);
     turn.remove();
-    note(e.message, true);
+    // A failed turn was never persisted, so trying again is simply asking it
+    // again: the question and the failure come off the thread and the same
+    // text goes back through, model, sources and all.
+    note(e.message, true, el => {
+      if (composer.busy) return note('Wait for the current answer to finish first.');
+      el.remove();
+      asked.remove();
+      runTurn(text);
+    });
   };
 
   try {

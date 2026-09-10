@@ -665,6 +665,7 @@ fn assistant_message(outcome: &RoundOutcome) -> Message {
             id: call.id.clone(),
             name: call.name.clone(),
             input: call.arguments.clone(),
+            signature: call.signature.clone(),
         });
     }
     Message { role: Role::Assistant, content }
