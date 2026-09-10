@@ -11,6 +11,7 @@
 //! text layer exists, ingestion fails with an honest error instead of storing
 //! a guess.
 
+pub mod sniff;
 pub mod text;
 mod render;
 
@@ -76,6 +77,89 @@ impl Kind {
             _ => Kind::Text,
         }
     }
+}
+
+/// Text as a person would read it, whatever it was saved as.
+///
+/// UTF-8 is nearly everything, but a file that carries a UTF-16 byte order mark
+/// would otherwise be indexed as every second character being a NUL, and one
+/// written in an older single byte encoding would lose its accents. Both are
+/// still someone's notes.
+pub fn decode_text(bytes: &[u8]) -> String {
+    match sniff::text_bom(bytes) {
+        Some("text/plain") => String::from_utf8_lossy(&bytes[3..]).into_owned(),
+        Some(mark) => {
+            let little = mark.ends_with("le");
+            let units: Vec<u16> = bytes[2..]
+                .chunks_exact(2)
+                .map(|p| if little {
+                    u16::from_le_bytes([p[0], p[1]])
+                } else {
+                    u16::from_be_bytes([p[0], p[1]])
+                })
+                .collect();
+            String::from_utf16_lossy(&units)
+        }
+        None => match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_string(),
+            // Not UTF-8, and `sniff` already said it reads as text, so it is an
+            // older single byte encoding: Latin-1 maps straight onto codepoints.
+            Err(_) => bytes.iter().map(|&b| b as char).collect(),
+        },
+    }
+}
+
+/// What a file is, decided by its bytes rather than by its name.
+///
+/// The declared media type and the extension are claims made by whoever
+/// uploaded the file, and they are wrong often enough to matter: an mp3 renamed
+/// to `.pdf` would otherwise be rasterized as a document, fail, and cost a model
+/// call to say so. The bytes decide; the name only fills in the finer label
+/// (`text/markdown` rather than `text/plain`) once the bytes agree it is text.
+pub fn identify(
+    bytes: &[u8],
+    filename: Option<&str>,
+    declared: Option<&str>,
+) -> AppResult<(Kind, String)> {
+    let found = sniff::sniff(bytes);
+
+    let Some(kind) = found.kind else {
+        return Err(AppError::Unsupported(format!(
+            "this file is {}, which the analyzer cannot read; it takes PDFs, \
+             images, audio, video and text files",
+            found.label
+        )));
+    };
+
+    // For text, a name that says `text/markdown` or `text/csv` is more precise
+    // than the bytes can be, so it wins. For everything else the bytes win.
+    let media_type = if kind == Kind::Text {
+        let named = declared
+            .filter(|m| m.starts_with("text/") || *m == "application/json")
+            .map(str::to_string)
+            .or_else(|| {
+                filename.map(|f| mime_guess::from_path(f).first_or_octet_stream().to_string())
+            })
+            .filter(|m| m.starts_with("text/") || m == "application/json");
+        named.unwrap_or_else(|| found.media_type.to_string())
+    } else {
+        found.media_type.to_string()
+    };
+
+    if let Some(name) = filename {
+        let claimed = Kind::from_media_type(
+            declared.unwrap_or("application/octet-stream"),
+            Some(name),
+        );
+        if claimed != kind {
+            tracing::info!(
+                file = %name, claimed = %claimed.as_str(), actual = %kind.as_str(),
+                "the name and the bytes disagree; going with the bytes"
+            );
+        }
+    }
+
+    Ok((kind, media_type))
 }
 
 /// One provider call with the retry schedule applied.
@@ -207,12 +291,32 @@ async fn run(
     source: &Source,
     model_override: Option<&str>,
 ) -> AppResult<()> {
-    let kind = Kind::from_media_type(&source.media_type, source.original_filename.as_deref());
+    // Rows stored before the bytes were ever checked, and files whose name
+    // lies, are both settled here: a header is cheap to read and never wrong.
+    let head = state.storage.read_head(&source.storage_path, HEAD_BYTES).await?;
+    let kind = match sniff::sniff(&head).kind {
+        Some(kind) => kind,
+        None => {
+            return Err(AppError::Unsupported(format!(
+                "this file is {}, which the analyzer cannot read; it takes PDFs, \
+                 images, audio, video and text files",
+                sniff::sniff(&head).label
+            )));
+        }
+    };
 
     let (markdown, model) = match kind {
         Kind::Text => {
             let bytes = state.storage.read(&source.storage_path).await?;
-            (String::from_utf8_lossy(&bytes).into_owned(), None::<String>)
+            if bytes.len() > TEXT_MAX_BYTES {
+                return Err(AppError::Unsupported(format!(
+                    "this text file is {} MiB, over the {} MiB the analyzer reads \
+                     in one piece; split it and upload the parts",
+                    bytes.len() / (1024 * 1024),
+                    TEXT_MAX_BYTES / (1024 * 1024)
+                )));
+            }
+            (decode_text(&bytes), None::<String>)
         }
         Kind::Image | Kind::Audio | Kind::Video => {
             analyze_media(state, source, kind, model_override).await?
@@ -249,6 +353,18 @@ const IMAGE_MAX_BYTES: usize = 20 * 1024 * 1024;
 const PDF_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_MAX_BYTES: usize = 100 * 1024 * 1024;
 const VIDEO_MAX_BYTES: usize = 200 * 1024 * 1024;
+
+/// Text is read whole and chunked, so it has a ceiling of its own.
+const TEXT_MAX_BYTES: usize = 32 * 1024 * 1024;
+/// A PDF claiming more pages than any real document has is broken or hostile.
+/// Refusing loudly beats spending a day of model calls on a generated file.
+const PDF_MAX_PAGES: usize = 5_000;
+/// A decompression bomb is a small file that claims to be enormous: a few
+/// hundred kilobytes of PNG can unpack to a gigabyte of pixels. The header
+/// says how big it intends to be, which is enough to turn it away.
+const IMAGE_MAX_PIXELS: u64 = 120_000_000;
+/// How many bytes of a file are enough to say what it is.
+const HEAD_BYTES: usize = 8 * 1024;
 
 /// How much extracted PDF text counts as a real text layer.
 const PDF_TEXT_SUBSTANTIAL: usize = 500;
@@ -296,6 +412,19 @@ fn prompt_for(kind: Kind) -> &'static str {
     }
 }
 
+/// A page count no real document has. Generated files can claim millions of
+/// pages, and every page is a model call, so this refuses rather than settling
+/// in for a week of work. It is a refusal, not a silent truncation: a document
+/// that is analyzed at all is analyzed in full.
+fn check_page_budget(total_pages: usize) -> AppResult<()> {
+    if total_pages > PDF_MAX_PAGES {
+        return Err(AppError::Unsupported(format!(
+            "this PDF claims {total_pages} pages, past the {PDF_MAX_PAGES} pages the              analyzer will work through; if that is real, split it and upload the parts"
+        )));
+    }
+    Ok(())
+}
+
 /// Images, audio and video: the analyzer model looks at the original bytes.
 /// Audio and video need an omni-style model on an OpenAI-style endpoint.
 async fn analyze_media(
@@ -321,6 +450,20 @@ async fn analyze_media(
             kind.as_str(),
             bytes.len() / (1024 * 1024),
             limit / (1024 * 1024)
+        )));
+    }
+
+    // A small file is not a small image. Ask the header what it unpacks to.
+    if kind == Kind::Image
+        && let Some((w, h)) = sniff::image_dimensions(&bytes)
+        && w.saturating_mul(h) > IMAGE_MAX_PIXELS
+    {
+        return Err(AppError::Unsupported(format!(
+            "this image says it is {w} by {h} pixels, {} megapixels, which is \
+             far past the {} megapixels the analyzer will decode; downscale it \
+             and upload again",
+            w.saturating_mul(h) / 1_000_000,
+            IMAGE_MAX_PIXELS / 1_000_000
         )));
     }
 
@@ -669,6 +812,7 @@ async fn analyze_pdf(
         })
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("page rendering failed: {e}")))?;
+        check_page_budget(total_pages)?;
         if total_pages > 0 {
             match analyze_page_images(state, &resolved, source, filename, &bytes, total_pages)
                 .await
@@ -746,7 +890,8 @@ pub fn extract_pdf_text(bytes: &[u8]) -> String {
         textual.extend_from_slice(&bytes[cursor..start.min(bytes.len())]);
         cursor = end.min(bytes.len());
         let dict = &bytes[start.saturating_sub(1500)..start];
-        if let Some(decoded) = decode_stream(parse_filters(dict), &bytes[start..cursor])
+        if textual.len() < EXTRACT_MAX_BYTES
+            && let Some(decoded) = decode_stream(parse_filters(dict), &bytes[start..cursor])
             && looks_textual(&decoded)
         {
             textual.extend_from_slice(&decoded);
@@ -846,6 +991,11 @@ fn is_name_char(b: u8) -> bool {
 
 /// Run a stream's filter chain. Anything image-shaped, encrypted-shaped or
 /// unknown yields `None`: the stream is skipped.
+/// The most one PDF stream may decompress to, and the most all of them
+/// together may add up to. Both exist to bound a decompression bomb.
+const STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
+const EXTRACT_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 fn decode_stream(filters: Option<Vec<String>>, data: &[u8]) -> Option<Vec<u8>> {
     let filters = filters?;
     if filters.is_empty() {
@@ -855,7 +1005,11 @@ fn decode_stream(filters: Option<Vec<String>>, data: &[u8]) -> Option<Vec<u8>> {
     for f in &filters {
         match f.as_str() {
             "FlateDecode" | "Fl" => {
-                buf = miniz_oxide::inflate::decompress_to_vec(&buf).ok()?;
+                // Unbounded inflate is how a kilobyte of PDF turns into a
+                // gigabyte of memory. A stream past this ceiling is not text
+                // anyone wrote, so the whole stream is dropped.
+                buf = miniz_oxide::inflate::decompress_to_vec_with_limit(&buf, STREAM_MAX_BYTES)
+                    .ok()?;
             }
             "ASCII85Decode" | "A85" => buf = ascii85_decode(&buf)?,
             "ASCIIHexDecode" | "AHx" => buf = ascii_hex_decode(&buf)?,
@@ -1152,6 +1306,113 @@ fn kind_of(source: &Source) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_impossible_page_count_is_refused_not_truncated() {
+        assert!(check_page_budget(PDF_MAX_PAGES).is_ok());
+        let err = check_page_budget(PDF_MAX_PAGES + 1).unwrap_err();
+        assert!(err.to_string().contains("split it"), "{err}");
+        // The number it claims is in the message, so the refusal is checkable.
+        assert!(check_page_budget(2_000_000).unwrap_err().to_string().contains("2000000"));
+    }
+
+    #[test]
+    fn text_survives_the_encoding_it_was_saved_in() {
+        assert_eq!(decode_text(b"plain ascii"), "plain ascii");
+        assert_eq!(decode_text("\u{feff}marked utf-8".as_bytes()), "marked utf-8");
+
+        let mut utf16 = b"\xff\xfe".to_vec();
+        for c in "wide text".encode_utf16() {
+            utf16.extend_from_slice(&c.to_le_bytes());
+        }
+        assert_eq!(decode_text(&utf16), "wide text");
+
+        let mut utf16be = b"\xfe\xff".to_vec();
+        for c in "wide text".encode_utf16() {
+            utf16be.extend_from_slice(&c.to_be_bytes());
+        }
+        assert_eq!(decode_text(&utf16be), "wide text");
+
+        // Latin-1 keeps its accents rather than becoming replacement marks.
+        assert_eq!(decode_text(b"caf\xe9"), "caf\u{e9}");
+    }
+
+    #[test]
+    fn a_lying_extension_loses_to_the_bytes() {
+        // An mp3 someone renamed to .pdf, declared as a PDF for good measure.
+        let mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00audio payload here";
+        let (kind, media_type) =
+            identify(mp3, Some("lecture.pdf"), Some("application/pdf")).expect("identified");
+        assert_eq!(kind, Kind::Audio);
+        assert_eq!(media_type, "audio/mpeg");
+
+        // And the other way round.
+        let pdf = b"%PDF-1.7\n1 0 obj\n<< >>\nendobj\n";
+        let (kind, media_type) =
+            identify(pdf, Some("song.mp3"), Some("audio/mpeg")).expect("identified");
+        assert_eq!(kind, Kind::Pdf);
+        assert_eq!(media_type, "application/pdf");
+    }
+
+    #[test]
+    fn a_text_file_keeps_the_finer_name_its_extension_gives_it() {
+        let (kind, media_type) =
+            identify(b"# Notes\n\nprose\n", Some("notes.md"), None).expect("identified");
+        assert_eq!(kind, Kind::Text);
+        assert_eq!(media_type, "text/markdown");
+
+        let (kind, media_type) =
+            identify(b"a,b\n1,2\n", Some("table.csv"), Some("text/csv")).expect("identified");
+        assert_eq!(kind, Kind::Text);
+        assert_eq!(media_type, "text/csv");
+    }
+
+    #[test]
+    fn a_file_the_analyzer_cannot_read_is_refused_by_name() {
+        let zip = b"PK\x03\x04\x14\x00\x00\x00\x08\x00word/document.xml";
+        let err = identify(zip, Some("paper.pdf"), Some("application/pdf")).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("a Word document"), "{message}");
+
+        let exe = b"MZ\x90\x00\x03\x00\x00\x00";
+        assert!(identify(exe, Some("notes.txt"), None).unwrap_err().to_string().contains(
+            "a Windows executable"
+        ));
+
+        // Binary residue with no recognisable header is refused too.
+        let noise: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        assert!(identify(&noise, Some("data.txt"), None).is_err());
+    }
+
+    /// A PDF stream that inflates far past the ceiling is dropped whole rather
+    /// than allocated. Without the limit this is how a small file eats memory.
+    #[test]
+    fn a_decompression_bomb_is_dropped_not_inflated() {
+        let payload = vec![b' '; STREAM_MAX_BYTES + 1024];
+        let squashed = miniz_oxide::deflate::compress_to_vec(&payload, 9);
+        assert!(squashed.len() < 100_000, "the bomb should be small on disk");
+        assert!(decode_stream(Some(vec!["FlateDecode".into()]), &squashed).is_none());
+
+        // A stream inside the ceiling still decodes, so the guard only bites
+        // on the absurd.
+        let ordinary = miniz_oxide::deflate::compress_to_vec(b"BT (real text) Tj ET", 6);
+        let out = decode_stream(Some(vec!["FlateDecode".into()]), &ordinary).expect("decoded");
+        assert!(out.starts_with(b"BT ("));
+    }
+
+    /// A PDF whose bytes are damaged past parsing yields no pages and no text,
+    /// which is what sends the analyzer to its fallbacks instead of panicking.
+    #[test]
+    fn a_corrupt_pdf_yields_nothing_without_panicking() {
+        let mut broken = b"%PDF-1.5\n".to_vec();
+        broken.extend((0u8..=255).cycle().take(3000));
+        assert_eq!(render::page_count(&broken), 0);
+        assert!(render::render_pdf_range(&broken, 0, 8).is_empty());
+        // It is still recognisably a PDF, so it is not turned away at upload:
+        // the analyzer gets its chance to read whatever survived.
+        assert_eq!(sniff::sniff(&broken).kind, Some(Kind::Pdf));
+        let _ = extract_pdf_text(&broken);
+    }
 
     #[test]
     fn kind_prefers_extension_over_octet_stream() {

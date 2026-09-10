@@ -1401,6 +1401,15 @@ async function upload(files, folderId) {
     const res = await api('/api/sources', { method: 'POST', body: fd });
     state.analysisTotal = res.uploaded.length;
     if (target) state.open.add(target);
+    // A file the analyzer cannot read is turned away by the server rather than
+    // stored to fail later. One bad file never sinks the rest of the drop, so
+    // say which ones did not make it and why.
+    const refused = res.rejected || [];
+    if (refused.length) {
+      say(refused.map(r => (r.filename || 'a file') + ': ' + r.reason).join('\n\n'),
+          refused.length === 1 ? 'That file was not added'
+                               : refused.length + ' files were not added');
+    }
   } catch (e) {
     note('upload failed: ' + e.message, true);
   }

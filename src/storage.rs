@@ -33,6 +33,17 @@ impl Storage {
         tokio::fs::read(self.absolute(relative)).await
     }
 
+    /// The first `limit` bytes, for deciding what a file is without pulling a
+    /// two hundred megabyte video into memory to look at its header.
+    pub async fn read_head(&self, relative: &str, limit: usize) -> std::io::Result<Vec<u8>> {
+        use tokio::io::AsyncReadExt;
+
+        let file = tokio::fs::File::open(self.absolute(relative)).await?;
+        let mut head = Vec::with_capacity(limit.min(64 * 1024));
+        file.take(limit as u64).read_to_end(&mut head).await?;
+        Ok(head)
+    }
+
     pub async fn put(&self, bytes: &[u8]) -> std::io::Result<Stored> {
         let sha256 = hex(&Sha256::digest(bytes));
         let relative = format!("{}/{}", &sha256[..2], sha256);

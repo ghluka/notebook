@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::analyzer::{self, Kind};
+use crate::analyzer;
 use crate::db::{self, NewSource, Source};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -18,6 +18,14 @@ pub struct Uploaded {
     source: Source,
     /// False when these exact bytes were already in the store.
     stored_new_blob: bool,
+}
+
+/// A file that was refused, and why. One bad file in a drop of twenty should
+/// not sink the other nineteen, so these travel back beside the successes.
+#[derive(Serialize)]
+pub struct Rejected {
+    filename: Option<String>,
+    reason: String,
 }
 
 /// `POST /api/sources` takes any number of `file` parts, so one drop of a dozen
@@ -65,25 +73,37 @@ pub async fn upload(
     let single = files.len() == 1;
 
     let mut uploaded: Vec<Uploaded> = Vec::new();
+    let mut rejected: Vec<Rejected> = Vec::new();
     for file in files {
         if file.bytes.is_empty() {
+            rejected.push(Rejected {
+                filename: file.filename.clone(),
+                reason: "this file is empty".into(),
+            });
             continue;
         }
 
-        // Trust the declared type only as a hint; fall back to the extension.
-        let media_type = file
-            .media_type
-            .filter(|m| m != "application/octet-stream")
-            .or_else(|| {
-                file.filename
-                    .as_deref()
-                    .map(|f| mime_guess::from_path(f).first_or_octet_stream().to_string())
-            })
-            .unwrap_or_else(|| "application/octet-stream".to_string());
+        /* What it is comes from the bytes, not from the name. A file whose
+           extension lies is analyzed for what it actually is, and one that is
+           nothing the analyzer reads is turned away here, before it takes up
+           disk and a slot in the queue. */
+        let (kind, media_type) = match analyzer::identify(
+            &file.bytes,
+            file.filename.as_deref(),
+            file.media_type.as_deref().filter(|m| *m != "application/octet-stream"),
+        ) {
+            Ok(found) => found,
+            Err(e) => {
+                // The bare sentence, since the file name is already beside it.
+                let reason = e.to_string();
+                let reason = reason.strip_prefix("unsupported: ").unwrap_or(&reason).to_string();
+                rejected.push(Rejected { filename: file.filename.clone(), reason });
+                continue;
+            }
+        };
 
         let stored = state.storage.put(&file.bytes).await?;
         let stored_new_blob = stored.is_new;
-        let kind = Kind::from_media_type(&media_type, file.filename.as_deref());
 
         let source = db::insert_source(
             &state.db,
@@ -112,7 +132,10 @@ pub async fn upload(
     // response returns as fast as the disk writes.
     analyzer::spawn_analysis(&state, uploaded.iter().map(|u| u.source.clone()).collect());
 
-    Ok(Json(json!({ "uploaded": uploaded })))
+    // Even a drop where nothing survived answers the same way, one line per
+    // file: the client shows those reasons next to the names they belong to,
+    // which reads better than one status code standing for twenty files.
+    Ok(Json(json!({ "uploaded": uploaded, "rejected": rejected })))
 }
 
 /// `GET /api/sources` returns everything the explorer draws: folders and
