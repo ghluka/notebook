@@ -261,8 +261,13 @@ impl ChatResponse {
 /// One piece of a streamed answer. Text arrives as it is generated; `Done`
 /// closes the turn with the tool calls and usage alongside it. Providers only
 /// ever yield text through `Text`, never smuggled inside `Done`.
+///
+/// `Thinking` is the model's reasoning, on providers that expose it. It comes
+/// before the answer on a channel of its own and is never part of the answer
+/// text: shown to the person while they wait, and not sent back to the model.
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
+    Thinking(String),
     Text(String),
     Done(StreamDone),
 }

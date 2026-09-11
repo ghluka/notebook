@@ -1,4 +1,8 @@
-//! The LLM layer: one neutral request type, two wire formats.
+//! The LLM layer: one neutral request type, three wire formats.
+//!
+//! Anthropic-style `/v1/messages`, and the two OpenAI-style formats:
+//! `/responses`, tried first, and `/chat/completions`, for endpoints without
+//! the newer route and for audio and video (see `openai.rs`).
 //!
 //! Which model a role uses is not decided here; that lives in the `models`
 //! registry, backed by the database. This module only knows how to talk.
@@ -9,6 +13,7 @@
 
 pub mod anthropic;
 pub mod openai;
+pub mod responses;
 pub mod types;
 
 use async_trait::async_trait;
@@ -612,6 +617,7 @@ mod tests {
         let mut done = None;
         while let Some(ev) = stream.next().await {
             match ev.unwrap() {
+                StreamEvent::Thinking(_) => {}
                 StreamEvent::Text(t) => text.push_str(&t),
                 StreamEvent::Done(d) => done = Some(d),
             }

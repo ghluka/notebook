@@ -71,14 +71,38 @@ question.\n\n\
 Cite a claim about the sources by copying the bracketed label printed above the \
 excerpt or slice you used, exactly as it appears, for example \
 [08NumberTheoryII.pdf, line 249]. Nothing else goes inside the brackets: no \
-field names, no quotation marks, no equals signs. Put the citation after the \
+field names, no quotation marks, no equals signs. Every citation names its \
+file, however many times that file has been cited already, and none goes \
+inside mathematics: close the formula first, then cite. Put the citation after the \
 sentence it supports, never inside the sentence as a word of it: the reader \
 sees sources listed separately, so each sentence must read correctly with the \
-bracket deleted. Answers drawn from the conversation need no citation.\n\n\
+bracket deleted: never \"as shown in [notes.pdf, line 3]\", which reads \"as \
+shown in.\" once the mark is gone. Answers drawn from the conversation need no \
+citation.\n\n\
 When the sources genuinely do not answer a question, say so in one sentence and \
 say what you looked for. Do not guess which file would have had it. Suggest \
 different wording, or ask the user to attach the right files.\n\n\
-Use markdown, and LaTeX for mathematics.";
+You can do things with the sources, not only point at them: work an \
+example, build a table, solve an exercise, set out a proof, or put what a \
+source says in another form. The facts and definitions come from the sources \
+and are cited; the working is yours to show. When the user asks you to make \
+something, make it in the answer. Never reply that it can be made, or that it \
+is shown somewhere.\n\n\
+Use markdown, and LaTeX for mathematics. A table is a markdown table: a header \
+row, a row of dashes under it, then one row per line.";
+
+/// Said once, when a round ends with nothing to show. Small models sometimes
+/// reason their way to a search and then write the call into their reasoning
+/// as text instead of making it, and the round ends empty.
+const ANSWER_NOW: &str = "You stopped without answering. Answer the question now, in \
+prose, from what you have already found, and cite it. Do not search again. If the \
+sources do not answer it, say so in one sentence.";
+
+/// A round that ends with nothing to show: no answer, and either no tool call
+/// or no budget left to run one.
+fn stalled(outcome: &RoundOutcome, round: usize) -> bool {
+    outcome.text.trim().is_empty() && (outcome.tool_calls.is_empty() || round >= MAX_TOOL_ROUNDS)
+}
 
 #[derive(Deserialize)]
 pub struct ChatBody {
@@ -131,6 +155,11 @@ pub struct ChatResponseBody {
     pub excerpts_searched: usize,
     /// Tool calls the model made on the way to this answer.
     pub tool_calls: Vec<String>,
+    /// How long the model reasoned before answering, summed over the rounds.
+    pub thinking_ms: u64,
+    /// The steps it took on the way, as stored: the finished turn is drawn
+    /// from these, so it reads exactly as it will when reopened.
+    pub trace: Vec<TraceStep>,
 }
 
 /// The tools, described the way they will be used.
@@ -294,6 +323,71 @@ fn cited_hits<'a>(answer: &str, hits: &'a [SearchHit]) -> Vec<&'a SearchHit> {
         }
     }
     used
+}
+
+/// Citation marks as the matcher expects them.
+///
+/// Models copy the label but not always its punctuation. Some cite in the
+/// lenticular brackets their training uses, `【file.pdf, line 2】`, and put a
+/// narrow no-break space inside, and an exact match then misses a citation the
+/// model did make, leaving only the word-overlap guess. So look-alike brackets,
+/// spaces and hyphens become their plain forms before anything is compared.
+/// This is for matching only: the stored answer keeps what the model wrote,
+/// and the client strips the same look-alikes when it renders.
+fn plain_marks(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{3010}' | '\u{3014}' | '\u{3016}' | '\u{FF3B}' => '[',
+            '\u{3011}' | '\u{3015}' | '\u{3017}' | '\u{FF3D}' => ']',
+            '\u{FF0C}' => ',',
+            '\u{00A0}' | '\u{2007}' | '\u{2009}' | '\u{200A}' | '\u{202F}' | '\u{3000}' => ' ',
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
+            other => other,
+        })
+        .collect()
+}
+
+/// A question with fewer searchable words than this points back at the
+/// conversation instead of naming anything: "can you summarize it?", "why?".
+const FOLLOW_UP_WORDS: usize = 2;
+/// How much of each earlier message goes into such a question's search.
+const FOLLOW_UP_CONTEXT_CHARS: usize = 240;
+
+/// What the first search runs on.
+///
+/// A follow-up that names nothing is about whatever was just discussed, and
+/// searching its own words finds junk the model then answers from: "can you
+/// summarize it?" once summarised a textbook chapter on cardinality instead of
+/// the reading the previous answer had just named. So a thin question is
+/// searched together with the exchange before it, the last answer first, since
+/// that is where the topic was named. Citation marks stay out of it, or a file
+/// the conversation had moved away from would be pulled straight back in.
+fn retrieval_query(message: &str, history: &[db::StoredMessage]) -> String {
+    if db::search_words(message).len() >= FOLLOW_UP_WORDS {
+        return message.to_string();
+    }
+    let last = |role: &str| history.iter().rev().find(|m| m.role == role);
+    let mut query = message.to_string();
+    for earlier in [last("assistant"), last("user")].into_iter().flatten() {
+        query.push('\n');
+        query.extend(without_marks(&earlier.content).chars().take(FOLLOW_UP_CONTEXT_CHARS));
+    }
+    query
+}
+
+/// Prose with every bracketed span taken out, in any of the bracket shapes.
+fn without_marks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut depth = 0usize;
+    for c in plain_marks(text).chars() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Distinctive words and numbers of a passage: long enough to be specific,
@@ -522,8 +616,16 @@ async fn prepare_turn(
         24_000
     };
 
+    // What has been said so far, read before searching: a follow-up that names
+    // nothing is searched together with the exchange it follows.
+    let history = match &existing {
+        Some(conversation) => db::active_messages(&state.db, &conversation.id).await?,
+        None => Vec::new(),
+    };
+
     let limit = body.max_hits.unwrap_or(HITS_PER_SEARCH).clamp(1, 30);
-    let seen = search_expanded(state, &body.message, &body.source_ids, limit).await?;
+    let query = retrieval_query(&body.message, &history);
+    let seen = search_expanded(state, &query, &body.source_ids, limit).await?;
 
     // A compaction summary stands in for the turns it replaced, then whatever
     // has been said since, then the excerpts, then the question.
@@ -535,7 +637,7 @@ async fn prepare_turn(
             )));
             messages.push(Message::assistant("Understood, I have those notes."));
         }
-        for m in db::active_messages(&state.db, &conversation.id).await? {
+        for m in history {
             match m.role.as_str() {
                 "user" => messages.push(Message::user(m.content)),
                 "assistant" => messages.push(Message::assistant(m.content)),
@@ -606,6 +708,10 @@ fn render_catalogue(briefs: &[db::SourceBrief]) -> String {
 
 /// What one model round produced, however it arrived.
 struct RoundOutcome {
+    /// What the model reasoned before answering, when it exposed that.
+    thinking: String,
+    /// How long it reasoned before the first word of its answer.
+    thinking_ms: u64,
     text: String,
     tool_calls: Vec<ToolCall>,
     input_tokens: u32,
@@ -668,6 +774,8 @@ async fn run_round(
         let r = crate::llm::chat_with_retry(client, request).await.map_err(rate_limit)?;
         return Ok(RoundOutcome {
             text: r.text,
+            thinking: r.thinking.unwrap_or_default(),
+            thinking_ms: 0,
             tool_calls: r.tool_calls,
             input_tokens: r.usage.input_tokens,
             output_tokens: r.usage.output_tokens,
@@ -679,21 +787,41 @@ async fn run_round(
             use futures::StreamExt;
             let mut stream = stream;
             let mut text = String::new();
+            let mut thinking = String::new();
+            // Timed from the first thought to the first word of the answer: the
+            // stretch the person was otherwise watching a spinner through.
+            let mut thought_since: Option<std::time::Instant> = None;
+            let mut thinking_ms = 0u64;
             let mut done = crate::llm::StreamDone::default();
             while let Some(ev) = stream.next().await {
                 if tx.is_closed() {
                     return Err(AppError::Internal(anyhow::anyhow!("client went away")));
                 }
                 match ev.map_err(rate_limit)? {
+                    StreamEvent::Thinking(t) => {
+                        thought_since.get_or_insert_with(std::time::Instant::now);
+                        thinking.push_str(&t);
+                        emit_json(tx, "thinking", json!({ "t": t }));
+                    }
                     StreamEvent::Text(t) => {
+                        if let Some(since) = thought_since.take() {
+                            thinking_ms += since.elapsed().as_millis() as u64;
+                        }
                         text.push_str(&t);
                         emit_json(tx, "token", json!({ "t": t }));
                     }
                     StreamEvent::Done(d) => done = d,
                 }
             }
+            // A round that only thought and then called tools thought until it
+            // ended.
+            if let Some(since) = thought_since {
+                thinking_ms += since.elapsed().as_millis() as u64;
+            }
             Ok(RoundOutcome {
                 text,
+                thinking,
+                thinking_ms,
                 tool_calls: done.tool_calls,
                 input_tokens: done.input_tokens,
                 output_tokens: done.output_tokens,
@@ -705,9 +833,14 @@ async fn run_round(
         Err(e) if is_stream_unsupported(&e) => {
             tracing::info!("streaming refused, answering one-shot for this round");
             let r = crate::llm::chat_with_retry(client, request).await.map_err(rate_limit)?;
+            if let Some(thought) = r.thinking.as_deref().filter(|t| !t.is_empty()) {
+                emit_json(tx, "thinking", json!({ "t": thought }));
+            }
             emit_json(tx, "token", json!({ "t": r.text }));
             Ok(RoundOutcome {
                 text: r.text,
+                thinking: r.thinking.unwrap_or_default(),
+                thinking_ms: 0,
                 tool_calls: r.tool_calls,
                 input_tokens: r.usage.input_tokens,
                 output_tokens: r.usage.output_tokens,
@@ -755,7 +888,8 @@ fn tool_log_line(call: &ToolCall) -> String {
             call.arguments["title"].as_str().unwrap_or_default(),
             call.arguments["from_line"].as_u64().unwrap_or(1)
         ),
-        other => other.to_string(),
+        "list_sources" => "listed the sources".to_string(),
+        other => other.replace('_', " "),
     }
 }
 
@@ -769,17 +903,89 @@ struct TurnUsage {
     output_tokens: u32,
 }
 
+/// What a turn did on the way to its answer, besides the answer itself: the
+/// files it opened, the tool calls it made, what it reasoned and for how long,
+/// and all of that as steps in the order it happened.
+#[derive(Default)]
+struct TurnTrace {
+    read_sources: Vec<(String, String)>,
+    tool_log: Vec<String>,
+    thinking: String,
+    thinking_ms: u64,
+    steps: Vec<TraceStep>,
+}
+
+/// One step a turn took before its answer. The page shows these between the
+/// question and the answer, and they are stored so that a reopened
+/// conversation reads exactly as the live one did.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TraceStep {
+    /// A stretch of reasoning, and how long it took.
+    Thinking { text: String, ms: u64 },
+    /// A tool call, as its margin line, and a short account of what it found.
+    Tool { line: String, found: String },
+}
+
+/// What a tool call came back with, in a line or two: which files and lines a
+/// search surfaced, which lines a read covered. The model gets the whole
+/// output; the person gets enough to see what it saw.
+fn tool_found(call: &ToolCall, output: &str) -> String {
+    match call.name.as_str() {
+        "search_sources" => {
+            // Excerpts arrive under their citation labels, `[title, line N]`.
+            let mut files: Vec<(String, Vec<String>)> = Vec::new();
+            for line in output.lines().map(str::trim) {
+                let Some(inner) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) else {
+                    continue;
+                };
+                let Some((title, locator)) = inner.rsplit_once(", ") else { continue };
+                let Some(number) = locator.strip_prefix("line ") else { continue };
+                match files.iter_mut().find(|(t, _)| t == title) {
+                    Some((_, numbers)) => numbers.push(number.to_string()),
+                    None => files.push((title.to_string(), vec![number.to_string()])),
+                }
+            }
+            if files.is_empty() {
+                return "Nothing matched.".to_string();
+            }
+            files
+                .into_iter()
+                .map(|(title, numbers)| {
+                    let noun = if numbers.len() == 1 { "line" } else { "lines" };
+                    format!("{title}, {noun} {}", numbers.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        // "notes.pdf, lines 1 to 220 of 400. Cite passages from here as ..."
+        "read_source" => output
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .split(". Cite")
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+        "list_sources" => match output.matches(" lines, ").count() {
+            0 => output.lines().next().unwrap_or_default().to_string(),
+            1 => "1 file".to_string(),
+            n => format!("{n} files"),
+        },
+        _ => output.chars().take(200).collect(),
+    }
+}
+
 async fn finish_turn(
     state: &AppState,
     prep: &PreparedTurn,
     message: &str,
     text: &str,
     usage: TurnUsage,
-    read_sources: Vec<(String, String)>,
-    tool_log: Vec<String>,
+    trace: TurnTrace,
 ) -> AppResult<ChatResponseBody> {
     let (input_tokens, output_tokens) = (usage.input_tokens, usage.output_tokens);
-    let mut citations: Vec<Citation> = cited_hits(text, &prep.seen)
+    let mut citations: Vec<Citation> = cited_hits(&plain_marks(text), &prep.seen)
         .into_iter()
         .map(|h| Citation {
             source_id: h.source_id.clone(),
@@ -806,7 +1012,8 @@ async fn finish_turn(
             .collect();
     }
     if citations.is_empty() {
-        citations = read_sources
+        citations = trace
+            .read_sources
             .iter()
             .map(|(id, title)| Citation {
                 source_id: id.clone(),
@@ -838,6 +1045,15 @@ async fn finish_turn(
         Some(db::Usage { input_tokens, output_tokens }),
     )
     .await?;
+    // Kept beside the answer, not in it: shown when the conversation is
+    // reopened, never sent back to the model.
+    if !trace.thinking.trim().is_empty() {
+        db::set_message_thinking(&state.db, &message_id, &trace.thinking, trace.thinking_ms)
+            .await?;
+    }
+    if !trace.steps.is_empty() {
+        db::set_message_trace(&state.db, &message_id, &json!(&trace.steps).to_string()).await?;
+    }
 
     Ok(ChatResponseBody {
         conversation_id,
@@ -853,7 +1069,9 @@ async fn finish_turn(
         context_used: input_tokens + output_tokens,
         context_window: prep.resolved.model.context_window,
         excerpts_searched: prep.seen.len(),
-        tool_calls: tool_log,
+        tool_calls: trace.tool_log,
+        thinking_ms: trace.thinking_ms,
+        trace: trace.steps,
     })
 }
 
@@ -871,9 +1089,13 @@ pub async fn chat(
     let mut output_tokens = 0;
     let mut tool_log: Vec<String> = Vec::new();
     let mut read_sources: Vec<(String, String)> = Vec::new();
+    let mut thinking = String::new();
+    let mut thinking_ms = 0u64;
+    let mut steps: Vec<TraceStep> = Vec::new();
 
     // The loop: answer, or ask for more and come back.
     let mut round = 0;
+    let mut answered_now = false;
     let outcome = loop {
         let request = ChatRequest::new(&prep.resolved.model.model_id, prep.messages.clone())
             .system(SYSTEM)
@@ -884,6 +1106,26 @@ pub async fn chat(
         let outcome = run_round(client.as_ref(), &request, &prep.resolved, None).await?;
         input_tokens += outcome.input_tokens;
         output_tokens += outcome.output_tokens;
+        if !outcome.thinking.is_empty() {
+            if !thinking.is_empty() {
+                thinking.push_str("\n\n");
+            }
+            thinking.push_str(&outcome.thinking);
+            steps.push(TraceStep::Thinking {
+                text: outcome.thinking.clone(),
+                ms: outcome.thinking_ms,
+            });
+        }
+        thinking_ms += outcome.thinking_ms;
+
+        // Worked, then stopped without a word: ask once for the answer. The
+        // round's own output is dropped, including any calls it can no longer
+        // afford to run, so the history stays one the provider will accept.
+        if stalled(&outcome, round) && !answered_now {
+            answered_now = true;
+            prep.messages.push(Message::user(ANSWER_NOW));
+            continue;
+        }
 
         if outcome.tool_calls.is_empty() || round >= MAX_TOOL_ROUNDS {
             break outcome;
@@ -902,6 +1144,10 @@ pub async fn chat(
                 prep.budget_chars,
             )
             .await?;
+            steps.push(TraceStep::Tool {
+                line: tool_log_line(call),
+                found: tool_found(call, &output),
+            });
             results.push(ContentPart::ToolResult {
                 tool_use_id: call.id.clone(),
                 content: output,
@@ -919,8 +1165,7 @@ pub async fn chat(
             &body.message,
             &outcome.text,
             TurnUsage { input_tokens, output_tokens },
-            read_sources,
-            tool_log,
+            TurnTrace { read_sources, tool_log, thinking, thinking_ms, steps },
         )
         .await?,
     ))
@@ -955,7 +1200,11 @@ async fn run_stream_turn(
     let mut output_tokens = 0;
     let mut tool_log: Vec<String> = Vec::new();
     let mut read_sources: Vec<(String, String)> = Vec::new();
+    let mut thinking = String::new();
+    let mut thinking_ms = 0u64;
+    let mut steps: Vec<TraceStep> = Vec::new();
     let mut round = 0;
+    let mut answered_now = false;
 
     loop {
         if tx.is_closed() {
@@ -977,6 +1226,26 @@ async fn run_stream_turn(
         };
         input_tokens += outcome.input_tokens;
         output_tokens += outcome.output_tokens;
+        if !outcome.thinking.is_empty() {
+            if !thinking.is_empty() {
+                thinking.push_str("\n\n");
+            }
+            thinking.push_str(&outcome.thinking);
+            steps.push(TraceStep::Thinking {
+                text: outcome.thinking.clone(),
+                ms: outcome.thinking_ms,
+            });
+        }
+        thinking_ms += outcome.thinking_ms;
+
+        // Worked, then stopped without a word: ask once for the answer. The
+        // round's own output is dropped, including any calls it can no longer
+        // afford to run, so the history stays one the provider will accept.
+        if stalled(&outcome, round) && !answered_now {
+            answered_now = true;
+            prep.messages.push(Message::user(ANSWER_NOW));
+            continue;
+        }
 
         if outcome.tool_calls.is_empty() || round >= MAX_TOOL_ROUNDS {
             if tx.is_closed() {
@@ -988,8 +1257,7 @@ async fn run_stream_turn(
                 &body.message,
                 &outcome.text,
                 TurnUsage { input_tokens, output_tokens },
-                read_sources,
-                tool_log,
+                TurnTrace { read_sources, tool_log, thinking, thinking_ms, steps },
             )
             .await
             {
@@ -1021,6 +1289,9 @@ async fn run_stream_turn(
                     return;
                 }
             };
+            let found = tool_found(call, &output);
+            emit_json(&tx, "tool_done", json!({ "found": found }));
+            steps.push(TraceStep::Tool { line, found });
             results.push(ContentPart::ToolResult {
                 tool_use_id: call.id.clone(),
                 content: output,
@@ -1115,6 +1386,128 @@ mod tests {
         // One pill for the file, not one per excerpt from it.
         assert_eq!(used.len(), 1);
         assert_eq!(used[0].locator.as_deref(), Some("line 1"));
+    }
+
+    /// Nemotron over LM Studio cited in lenticular brackets, with narrow
+    /// no-break spaces inside and non-breaking hyphens around. Those marks are
+    /// still citations, and they name exact lines.
+    #[test]
+    fn citations_in_look_alike_brackets_still_resolve() {
+        let hits = vec![
+            hit("01HowToRead.pdf", "line 2", "s1"),
+            hit("01HowToRead.pdf", "line 3", "s1"),
+            hit("fuchs.pdf", "line 9", "s2"),
+        ];
+        let answer = "Mathematicians double\u{2011}back and re\u{2011}read.\
+                      \u{3010}01HowToRead.pdf, line 2\u{3011} Students fix on formulas.\
+                      \u{3010}01HowToRead.pdf,\u{202F}line\u{202F}3\u{3011}";
+        assert!(cited_hits(answer, &hits).is_empty(), "the raw marks match nothing");
+
+        let used = cited_hits(&plain_marks(answer), &hits);
+        let lines: Vec<_> = used.iter().filter_map(|h| h.locator.as_deref()).collect();
+        assert_eq!(lines, vec!["line 2", "line 3"], "exact lines, not a word-overlap guess");
+
+        // The prose itself is left alone apart from the marks' punctuation.
+        assert_eq!(plain_marks("re\u{2011}read"), "re-read");
+        assert_eq!(plain_marks("plain [a.pdf, line 1]"), "plain [a.pdf, line 1]");
+    }
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall { id: "c".into(), name: name.into(), arguments: json!({}), signature: None }
+    }
+
+    #[test]
+    fn a_round_that_ends_in_nothing_is_a_stall() {
+        let round = |text: &str, calls: usize| RoundOutcome {
+            text: text.into(),
+            thinking: "I should search for it.".into(),
+            thinking_ms: 0,
+            tool_calls: (0..calls).map(|_| call("search_sources")).collect(),
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+        assert!(stalled(&round("", 0), 0), "thought, then nothing");
+        assert!(stalled(&round("  \n", 0), 2), "whitespace is nothing too");
+        assert!(!stalled(&round("", 1), 0), "a tool call is progress");
+        assert!(stalled(&round("", 1), MAX_TOOL_ROUNDS), "a call with no budget left to run it");
+        assert!(!stalled(&round("A set is a collection.", 0), 0));
+        assert_eq!(tool_log_line(&call("list_sources")), "listed the sources");
+    }
+
+    /// The trace says what a call found in a line or two, not the whole dump.
+    #[test]
+    fn a_tool_call_is_summed_up_by_what_it_found() {
+        let hits = vec![
+            hit("02SetsAndPropositions.pdf", "line 306", "s1"),
+            hit("02SetsAndPropositions.pdf", "line 307", "s1"),
+            hit("readings.md", "line 4", "s2"),
+        ];
+        let searched = render_excerpts(&hits, 100_000);
+        assert_eq!(
+            tool_found(&call("search_sources"), &searched),
+            "02SetsAndPropositions.pdf, lines 306, 307\nreadings.md, line 4"
+        );
+        assert_eq!(tool_found(&call("search_sources"), "Nothing matched that search."),
+                   "Nothing matched.");
+
+        let read = "notes.pdf, lines 1 to 220 of 400. Cite passages from here as \
+                    [notes.pdf, line N] using the numbers shown.\n\n1 | text";
+        assert_eq!(tool_found(&call("read_source"), read), "notes.pdf, lines 1 to 220 of 400");
+    }
+
+    fn said(role: &str, content: &str) -> db::StoredMessage {
+        db::StoredMessage {
+            id: String::new(),
+            conversation_id: String::new(),
+            role: role.into(),
+            content: content.into(),
+            tool_calls: None,
+            citations: None,
+            compacted: false,
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+            thinking: None,
+            thinking_ms: None,
+            trace: None,
+            created_at: String::new(),
+        }
+    }
+
+    /// The turn that summarised a textbook chapter on cardinality instead of
+    /// the reading the previous answer had just named.
+    #[test]
+    fn a_follow_up_that_names_nothing_searches_with_the_exchange_before_it() {
+        let history = vec![
+            said("user", "summarize the first reading"),
+            said("assistant", "Mathematical reading differs.\u{3010}01HowToRead.pdf, line 2\u{3011}"),
+            said("user", "what about the second reading?"),
+            said("assistant", "The second reading is \u{201c}Sets and Propositions\u{201d} for Week 02."),
+        ];
+        let query = retrieval_query("can you summarize it???", &history);
+        assert!(query.contains("Sets and Propositions"), "{query}");
+        assert!(query.contains("second reading"), "{query}");
+        assert!(!query.contains("01HowToRead"), "only the exchange just before: {query}");
+
+        // A question that names its subject is searched as it stands, and so
+        // is one with two content words, so the last topic cannot drag it back.
+        let named = "summarize the second reading";
+        assert_eq!(retrieval_query(named, &history), named);
+        assert_eq!(retrieval_query("what about the second reading?", &history),
+                   "what about the second reading?");
+        // And the first question of a conversation has nothing to lean on.
+        assert_eq!(retrieval_query("why?", &[]), "why?");
+    }
+
+    #[test]
+    fn earlier_citations_do_not_steer_the_search() {
+        let history = vec![
+            said("user", "what about cardinality"),
+            said("assistant", "Cantor's theorem. \u{3010}fuchs.pdf, line 3804\u{3011} [fuchs.pdf, line 3821]"),
+        ];
+        let query = retrieval_query("and?", &history);
+        assert!(query.contains("Cantor"), "{query}");
+        assert!(!query.to_lowercase().contains("fuchs"), "{query}");
     }
 
     #[test]

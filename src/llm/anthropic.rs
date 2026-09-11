@@ -308,6 +308,11 @@ fn feed_anthropic_record(
                     Some(t) if !t.is_empty() => Ok(Some(StreamEvent::Text(t.to_string()))),
                     _ => Ok(None),
                 },
+                // Extended thinking streams as its own block, before the answer.
+                Some("thinking_delta") => match delta["thinking"].as_str() {
+                    Some(t) if !t.is_empty() => Ok(Some(StreamEvent::Thinking(t.to_string()))),
+                    _ => Ok(None),
+                },
                 Some("input_json_delta") => {
                     let index = v["index"].as_u64().unwrap_or(0);
                     if let Some(part) = delta["partial_json"].as_str() {
@@ -372,6 +377,17 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(text, Some(StreamEvent::Text(ref t)) if t == "hi"));
+
+        // Reasoning streams on its own channel, never as answer text.
+        let thought = feed_anthropic_record(
+            &mut state,
+            &record(
+                "content_block_delta",
+                r#"{"index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+            ),
+        )
+        .unwrap();
+        assert!(matches!(thought, Some(StreamEvent::Thinking(ref t)) if t == "hmm"));
 
         let delta = feed_anthropic_record(
             &mut state,

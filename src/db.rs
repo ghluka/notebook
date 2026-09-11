@@ -634,6 +634,18 @@ fn fts_terms(query: &str) -> Vec<String> {
     chosen.into_iter().take(24).map(|t| format!("\"{t}\"")).collect()
 }
 
+/// The words of a query worth searching for: what `fts_terms` keeps, without
+/// its fallback to every word. How many there are tells a question that names
+/// something from one that only points back at the conversation.
+pub fn search_words(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() > 1)
+        .map(str::to_lowercase)
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
 #[cfg(test)]
 mod query_tests {
     use super::fts_terms;
@@ -880,6 +892,13 @@ pub struct StoredMessage {
     /// context meter rather than showing zero.
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    /// The model's reasoning before this answer, and how long it took, when it
+    /// exposed any. Shown on reopening, never sent back to the model.
+    pub thinking: Option<String>,
+    pub thinking_ms: Option<i64>,
+    /// The steps the turn took before this answer, as JSON: stretches of
+    /// reasoning and tool calls, in order. See `routes::chat::TraceStep`.
+    pub trace: Option<String>,
     pub created_at: String,
 }
 
@@ -921,6 +940,34 @@ pub async fn append_message(
         .execute(db)
         .await?;
     Ok(id)
+}
+
+/// The reasoning behind an assistant turn, kept beside the answer rather than
+/// in it: shown when the conversation is reopened, never sent back to the
+/// model, never searched.
+pub async fn set_message_thinking(
+    db: &Db,
+    id: &str,
+    thinking: &str,
+    thinking_ms: u64,
+) -> sqlx::Result<()> {
+    sqlx::query("UPDATE messages SET thinking = ?2, thinking_ms = ?3 WHERE id = ?1")
+        .bind(id)
+        .bind(thinking)
+        .bind(thinking_ms as i64)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// The steps behind an assistant turn, kept for display like its reasoning.
+pub async fn set_message_trace(db: &Db, id: &str, trace: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE messages SET trace = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(trace)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 /// Everything ever said, for display.

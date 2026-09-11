@@ -161,6 +161,14 @@
   /* Rendered formulas. MathML inherits the surrounding serif, which is what we
      want; it just needs a touch more size and room to breathe. */
   .turn.assistant .body math { font-size:1.06em; }
+  /* Tables scroll sideways inside their own box, so a wide one never makes the
+     page scroll. Sans and a little smaller than prose, the way data reads. */
+  .turn.assistant .body .table-wrap { overflow-x:auto; margin:0 0 14px; }
+  .turn.assistant .body table { border-collapse:collapse; font:14px/1.5 var(--sans); }
+  .turn.assistant .body th, .turn.assistant .body td {
+      border:1px solid var(--line); padding:5px 12px; text-align:left; vertical-align:top; }
+  .turn.assistant .body th { background:var(--raised); font-weight:600; }
+  .turn.assistant .body .no-answer { color:var(--faint); font:14px/1.6 var(--sans); }
   /* overflow-x on its own promotes overflow-y to auto, which puts a scrollbar
      beside formulas that have nothing to scroll. Pin the vertical axis. */
   .math-block { margin:0 0 16px; padding:4px 0; text-align:center;
@@ -201,9 +209,23 @@
                display:flex; align-items:center; gap:4px; }
   .turn.note.bad { color:var(--bad); }
   .thinking { color:var(--faint); font-size:13px; }
-  /* Tool progress while a streamed turn runs; cleared when it finishes, since
-     the meta line below the answer says the same thing. */
-  .tool-status { color:var(--faint); font-size:12px; padding:1px 0; }
+  /* What the model did before answering, in order: each stretch of reasoning
+     and each tool call is one quiet line, and its detail opens in a card
+     underneath. The line has no box of its own; only the detail does. */
+  .trace { margin:0 0 10px; }
+  .step > button { display:inline-flex; align-items:center; gap:6px; padding:3px 0;
+                   background:transparent; border:0; color:var(--faint); font-size:13px;
+                   text-align:left; cursor:default; }
+  .step.has-detail > button { cursor:pointer; }
+  .step.has-detail > button:hover, .step.live > button { color:var(--dim); }
+  .step .chev { display:none; transition:transform .15s ease; }
+  .step.has-detail .chev { display:inline-block; }
+  .step.open .chev { transform:rotate(90deg); }
+  .step .detail { display:none; margin:2px 0 8px; padding:10px 14px; border-radius:10px;
+                  background:var(--panel); border:1px solid var(--line); color:var(--dim);
+                  font-size:13px; line-height:1.55; white-space:pre-wrap;
+                  overflow-wrap:anywhere; max-height:320px; overflow-y:auto; }
+  .step.open .detail { display:block; }
   /* A caret on the answer while tokens are still arriving. */
   .turn.live .body::after { content:'▍'; color:var(--accent); animation:blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity:0; } }
@@ -1579,6 +1601,15 @@ const SYMBOL = {
   leftrightarrow:'↔', Leftrightarrow:'⇔', nearrow:'↗', searrow:'↘',
   lfloor:'⌊', rfloor:'⌋', lceil:'⌈', rceil:'⌉', wedge:'∧', vee:'∨',
   bullet:'∙', dagger:'†', colon:':', sqrtsign:'√', surd:'√',
+  // Logic, order and set symbols found missing by sweeping the converter with
+  // the macros propositional logic and set theory notes are written in.
+  lnot:'¬', top:'⊤', bot:'⊥', gets:'←', nexists:'∄', ni:'∋', complement:'∁',
+  veebar:'⊻', barwedge:'⊼', Longrightarrow:'⟹', longleftarrow:'⟵',
+  Longleftarrow:'⟸', longleftrightarrow:'⟷', Longleftrightarrow:'⟺',
+  Uparrow:'⇑', Downarrow:'⇓', ddots:'⋱', vert:'|', Vert:'‖', lvert:'|',
+  rvert:'|', lVert:'‖', rVert:'‖', backslash:'\\', Box:'□', Diamond:'◇',
+  wp:'℘', prec:'≺', succ:'≻', preceq:'⪯', succeq:'⪰', subsetneqq:'⫋',
+  nsubseteq:'⊈', nsupseteq:'⊉', sqcup:'⊔', sqcap:'⊓', uplus:'⊎',
 };
 
 /// Commands that change layout rather than content, and have nothing to say
@@ -1597,6 +1628,7 @@ const DISCARDS_ARGUMENT = ['label', 'tag', 'ref', 'eqref', 'intertext', 'hspace'
 const BIG_OPS = {
   sum:'∑', prod:'∏', coprod:'∐', int:'∫', iint:'∬',
   iiint:'∭', oint:'∮', bigcup:'⋃', bigcap:'⋂', lim:'lim',
+  bigwedge:'⋀', bigvee:'⋁', bigoplus:'⨁', bigotimes:'⨂', bigsqcup:'⨆',
 };
 
 const FUNCS = ['sin','cos','tan','sec','csc','cot','arcsin','arccos','arctan','sinh',
@@ -1606,6 +1638,37 @@ const FUNCS = ['sin','cos','tan','sec','csc','cot','arcsin','arccos','arctan','s
 const VARIANTS = { mathbf:'bold', mathbb:'double-struck', mathcal:'script',
                    mathfrak:'fraktur', mathit:'italic', mathrm:'normal',
                    mathsf:'sans-serif', mathtt:'monospace', bm:'bold-italic' };
+
+/* Where each style's capital A, small a and digit 0 sit among Unicode's
+   mathematical alphanumerics, plus the letters encoded earlier elsewhere, which
+   leave holes in the run (the double-struck N is U+2115, not in the block). */
+const STYLED = {
+  'bold':          { A: 0x1D400, a: 0x1D41A, zero: 0x1D7CE },
+  'italic':        { A: 0x1D434, a: 0x1D44E, holes: { h: 0x210E } },
+  'bold-italic':   { A: 0x1D468, a: 0x1D482 },
+  'script':        { A: 0x1D49C, a: 0x1D4B6, holes: { B: 0x212C, E: 0x2130, F: 0x2131,
+                     H: 0x210B, I: 0x2110, L: 0x2112, M: 0x2133, R: 0x211B, e: 0x212F,
+                     g: 0x210A, o: 0x2134 } },
+  'fraktur':       { A: 0x1D504, a: 0x1D51E, holes: { C: 0x212D, H: 0x210C, I: 0x2111,
+                     R: 0x211C, Z: 0x2128 } },
+  'double-struck': { A: 0x1D538, a: 0x1D552, zero: 0x1D7D8, holes: { C: 0x2102, H: 0x210D,
+                     N: 0x2115, P: 0x2119, Q: 0x211A, R: 0x211D, Z: 0x2124 } },
+  'sans-serif':    { A: 0x1D5A0, a: 0x1D5BA, zero: 0x1D7E2 },
+  'monospace':     { A: 0x1D670, a: 0x1D68A, zero: 0x1D7F6 },
+};
+
+function styledLetters(text, variant) {
+  const style = STYLED[variant];
+  if (!style) return text;
+  return [...text].map(ch => {
+    if (style.holes && style.holes[ch]) return String.fromCodePoint(style.holes[ch]);
+    const c = ch.codePointAt(0);
+    if (c >= 65 && c <= 90) return String.fromCodePoint(style.A + c - 65);
+    if (c >= 97 && c <= 122) return String.fromCodePoint(style.a + c - 97);
+    if (style.zero && c >= 48 && c <= 57) return String.fromCodePoint(style.zero + c - 48);
+    return ch;
+  }).join('');
+}
 
 const ACCENTS = { hat:'̂', bar:'¯', vec:'→', tilde:'̃',
                   dot:'˙', ddot:'¨', overline:'¯' };
@@ -1620,19 +1683,19 @@ function texTokens(src) {
     if (c === '\\') {
       const m = /^\\([a-zA-Z]+|.)/.exec(src.slice(i));
       if (!m) return null;
-      out.push({ t: 'cmd', v: m[1] });
+      out.push({ t: 'cmd', v: m[1], at: i });
       i += m[0].length;
     } else if ('{}^_&'.includes(c)) {
-      out.push({ t: c });
+      out.push({ t: c, at: i });
       i++;
     } else if (/\s/.test(c)) {
       i++;
     } else if (/[0-9]/.test(c)) {
       const m = /^[0-9]+(\.[0-9]+)?/.exec(src.slice(i));
-      out.push({ t: 'num', v: m[0] });
+      out.push({ t: 'num', v: m[0], at: i });
       i += m[0].length;
     } else {
-      out.push({ t: 'ch', v: c });
+      out.push({ t: 'ch', v: c, at: i });
       i++;
     }
   }
@@ -1681,17 +1744,24 @@ function texToMathml(tex, display) {
     return one == null ? fail() : one;
   }
 
-  function textArgument() {
+  /* A braced argument read as text rather than as mathematics. The tokenizer
+     drops spaces, which is right for symbols and wrong for prose, so text that
+     keeps its spaces is cut from the source between the matching braces. Names
+     (environments, styled letters) keep the old spaceless reading. */
+  function textArgument(keepSpaces = false) {
     if (i >= tokens.length || tokens[i].t !== '{') return null;
-    i++;
-    let text = '';
-    while (i < tokens.length && tokens[i].t !== '}') {
-      const tk = tokens[i++];
-      text += tk.v === undefined ? '' : tk.v;
+    const openAt = i++;
+    let depth = 1;
+    for (; i < tokens.length; i++) {
+      if (tokens[i].t === '{') depth++;
+      else if (tokens[i].t === '}' && --depth === 0) break;
     }
     if (i >= tokens.length) return null;
-    i++;
-    return text;
+    const closeAt = i++;
+    if (!keepSpaces) {
+      return tokens.slice(openAt + 1, closeAt).map(tk => tk.v === undefined ? '' : tk.v).join('');
+    }
+    return tex.slice(tokens[openAt].at + 1, tokens[closeAt].at).replace(/\\([&%$#_{} ])/g, '$1');
   }
 
   function command(name) {
@@ -1725,16 +1795,22 @@ function texToMathml(tex, display) {
     if (VARIANTS[name]) {
       const text = textArgument();
       if (text === null) return { html: fail() };
-      return { html: '<mi mathvariant="' + VARIANTS[name] + '">' + esc(text) + '</mi>' };
+      // Browsers honour no mathvariant but "normal", so \mathbb{N} came out as
+      // a plain N. The styled letters exist in Unicode; use those instead.
+      return { html: '<mi mathvariant="normal">' +
+                     esc(styledLetters(text, VARIANTS[name])) + '</mi>' };
     }
     if (ACCENTS[name]) {
       return { html: '<mover accent="true">' + argument() +
                      '<mo>' + esc(ACCENTS[name]) + '</mo></mover>' };
     }
     if (name === 'text' || name === 'textrm' || name === 'mbox' || name === 'operatorname') {
-      const text = textArgument();
+      const text = textArgument(true);
       if (text === null) return { html: fail() };
-      return { html: '<mtext>' + esc(text) + '</mtext>' };
+      // MathML trims the ends of a text run, and `a \text{ is a set }` needs
+      // them: those spaces are what keep the words off the symbols.
+      const padded = text.replace(/^\s+/, ' ').replace(/\s+$/, ' ');
+      return { html: '<mtext>' + esc(padded) + '</mtext>' };
     }
     if (name === 'left' || name === 'right') {
       const fence = tokens[i];
@@ -1749,6 +1825,21 @@ function texToMathml(tex, display) {
     if (DISCARDS_ARGUMENT.includes(name)) {
       if (textArgument() === null) return { html: fail() };
       return { html: '' };
+    }
+    // \not before a relation strikes it through: \not\in is ∉, \not= is ≠.
+    if (name === 'not') {
+      const next = tokens[i];
+      if (!next) return { html: fail() };
+      const NEGATED = { in:'∉', ni:'∌', subset:'⊄', subseteq:'⊈', supset:'⊅',
+                        supseteq:'⊉', equiv:'≢', mid:'∤', exists:'∄', parallel:'∦',
+                        sim:'≁', approx:'≉', cong:'≇', leq:'≰', le:'≰', geq:'≱',
+                        ge:'≱', '=':'≠', '<':'≮', '>':'≯' };
+      i++;
+      const key = next.t === 'cmd' || next.t === 'ch' ? next.v : null;
+      if (key && NEGATED[key]) return { html: '<mo>' + esc(NEGATED[key]) + '</mo>' };
+      // Anything else gets the slash TeX would draw over it.
+      const glyph = next.t === 'cmd' ? SYMBOL[next.v] : next.v;
+      return glyph ? { html: '<mo>' + esc(glyph + '̸') + '</mo>' } : { html: fail() };
     }
     // "mod" as an operator, and the parenthesised form used in congruences.
     if (name === 'bmod') return { html: '<mo lspace="0.28em" rspace="0.28em">mod</mo>' };
@@ -1936,6 +2027,9 @@ function markdown(src) {
   // Code fences and math come out first, so escaping never touches them.
   let text = src.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
     hold('<pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>'));
+  // Some models put narrow no-break spaces between ordinary words, and at a
+  // fifth of an em "is T" reads as "isT". In prose a space is a space.
+  text = text.replace(/[  ]/g, ' ');
 
   const renderMath = (tex, display) => {
     const mathml = texToMathml(tex.trim(), display);
@@ -1952,7 +2046,16 @@ function markdown(src) {
   text = text
     .replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => hold(renderMath(tex, true)))
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, tex) => hold(renderMath(tex, true)))
-    .replace(/\\\(([\s\S]+?)\\\)/g, (_, tex) => hold(renderMath(tex, false)))
+    // An inline span may not run through the opening of another, or one \(
+    // left unclosed would swallow the prose up to the next formula's \).
+    .replace(/\\\(((?:(?!\\\()[\s\S])+?)\\\)/g, (_, tex) => hold(renderMath(tex, false)))
+    // A \( that never closes still opened mathematics. It runs to the end of
+    // its sentence, and is taken only when what is there is LaTeX that really
+    // renders; anything else is left exactly as written.
+    .replace(/\\\(((?:(?!\\\(|\n)[\s\S])+?)(?=(?<!\\)[.;]\s|\n|$)/g, (m, tex) => {
+      const mathml = /\\[a-zA-Z]/.test(tex) ? texToMathml(tex.trim(), false) : null;
+      return mathml ? hold(mathml) : m;
+    })
     // Inline needs non-space at both ends, so prices stay prices.
     .replace(/\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, tex) => hold(renderMath(tex, false)))
     .replace(BARE_ENV, m => hold(renderMath(m, true)));
@@ -1968,10 +2071,36 @@ function markdown(src) {
   let list = null;
   const closeList = () => { if (list) { out.push('</' + list + '>'); list = null; } };
 
-  for (const line of text.split('\n')) {
+  const lines = text.split('\n');
+  for (let n = 0; n < lines.length; n++) {
+    const line = lines[n];
     const solo = line.match(/^(\d+)$/);
     if (solo) { closeList(); out.push(held[+solo[1]]); continue; }
     if (!line.trim()) { closeList(); continue; }
+
+    /* A table: a header row, the row of dashes under it with as many columns,
+       then rows until the first line without a pipe. Maths was taken out
+       before this, so a `|x|` in a cell cannot split it, and cells go through
+       the same inline pass as prose. */
+    const rule = n + 1 < lines.length ? lines[n + 1] : '';
+    if (line.includes('|') && TABLE_RULE.test(rule) &&
+        tableCells(rule).length === tableCells(line).length) {
+      closeList();
+      const align = tableCells(rule).map(c => /^:-+:$/.test(c) ? 'center'
+        : /^-+:$/.test(c) ? 'right' : /^:-+$/.test(c) ? 'left' : '');
+      const cell = (tag, text, i) => '<' + tag +
+        (align[i] ? ' style="text-align:' + align[i] + '"' : '') + '>' + inline(text) + '</' + tag + '>';
+      const head = tableCells(line);
+      let html = '<div class="table-wrap"><table><thead><tr>' +
+                 head.map((c, i) => cell('th', c, i)).join('') + '</tr></thead><tbody>';
+      for (n += 2; n < lines.length && lines[n].trim() && lines[n].includes('|'); n++) {
+        const row = tableCells(lines[n]);
+        html += '<tr>' + head.map((_, i) => cell('td', row[i] ?? '', i)).join('') + '</tr>';
+      }
+      n--; // the loop's own step moves past the last row
+      out.push(html + '</tbody></table></div>');
+      continue;
+    }
 
     const heading = line.match(/^(#{1,4})\s+(.*)$/);
     if (heading) {
@@ -2002,6 +2131,29 @@ function markdown(src) {
 
   // Put the held blocks back, including any that sat inside a paragraph.
   return out.join('').replace(/(\d+)/g, (_, n) => held[+n]);
+}
+
+/* The row of dashes under a table's header: `|---|:---:|--:|`, with the pipes
+   at either end optional and at least one dash to a column. */
+const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+/* A table row's cells: split on pipes that are neither escaped nor inside a
+   code span, with the optional pipes at either end dropped. */
+function tableCells(row) {
+  let s = row.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  const cells = [];
+  let cur = '', code = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === '\\' && s[i + 1] === '|') { cur += '|'; i++; continue; }
+    if (c === '`') code = !code;
+    if (c === '|' && !code) { cells.push(cur.trim()); cur = ''; continue; }
+    cur += c;
+  }
+  cells.push(cur.trim());
+  return cells;
 }
 
 /* --------------------------------------------------- attachments */
@@ -2125,10 +2277,78 @@ function assistantTurn() {
   const started = Date.now();
   const label = el.querySelector('.thinking');
   el.timer = setInterval(() => {
-    label.textContent = `Thinking ${Math.round((Date.now() - started) / 1000)}s`;
+    const secs = Math.round((Date.now() - started) / 1000);
+    label.textContent = `Thinking ${secs}s`;
+    // Once a stretch of reasoning is showing, its line is the status instead,
+    // counting that stretch rather than the whole turn.
+    const live = el.querySelector('.step.thought.live');
+    if (live) live.querySelector('.label').textContent =
+      `Thinking… ${Math.round((Date.now() - +live.dataset.since) / 1000)}s`;
   }, 1000);
   el.elapsed = () => Math.round((Date.now() - started) / 1000);
   return el;
+}
+
+/* What a turn did before its answer, as quiet lines above it: each stretch of
+   reasoning and each tool call, in the order they happened. A line opens to
+   show its detail in a card underneath: the reasoning itself, or what a call
+   found. Made on the first step, so a turn that goes straight to its answer
+   shows only the plain timer. */
+function traceOf(turn) {
+  let trace = turn.querySelector('.trace');
+  if (!trace) {
+    trace = document.createElement('div');
+    trace.className = 'trace';
+    turn.querySelector('.body').before(trace);
+  }
+  return trace;
+}
+
+function addStep(turn, label, { live = false } = {}) {
+  const step = document.createElement('div');
+  step.className = 'step' + (live ? ' live' : '');
+  step.innerHTML = '<button type="button"><span class="label"></span>' +
+                   '<span class="chev">›</span></button><div class="detail"></div>';
+  step.querySelector('.label').textContent = label;
+  step.querySelector('button').onclick = () => {
+    if (step.classList.contains('has-detail')) step.classList.toggle('open');
+  };
+  traceOf(turn).append(step);
+  return step;
+}
+
+function setDetail(step, text, { append = false } = {}) {
+  const detail = step.querySelector('.detail');
+  if (append) detail.append(text); else detail.textContent = text;
+  step.classList.toggle('has-detail', detail.textContent.trim() !== '');
+}
+
+/* "searched cardinality" reads better as "Searched cardinality". */
+const toolLabel = line => line
+  ? (line[0].toUpperCase() + line.slice(1)).replace(/_/g, ' ') : 'Used a tool';
+
+/* The steps as the server stored them, folded. A finished live turn and a
+   reopened one are drawn by this same function, so they always read alike. */
+function drawTrace(turn, steps) {
+  turn.querySelector('.trace')?.remove();
+  for (const s of steps) {
+    const thought = s.kind === 'thinking';
+    const step = addStep(turn, thought
+      ? (s.ms ? 'Thought for ' + thoughtFor(s.ms) : 'Thought')
+      : toolLabel(s.line));
+    if (thought) step.classList.add('thought');
+    setDetail(step, thought ? s.text : s.found || '');
+  }
+}
+
+/* "1.91 seconds", "43 seconds", "2 minutes 5 seconds". */
+function thoughtFor(ms) {
+  const s = ms / 1000;
+  if (s < 1) return 'a moment';
+  if (s < 10) return s.toFixed(2) + ' seconds';
+  if (s < 60) return Math.round(s) + ' seconds';
+  const m = Math.floor(s / 60), rest = Math.round(s % 60);
+  return m + (m === 1 ? ' minute' : ' minutes') + (rest ? ' ' + rest + ' seconds' : '');
 }
 
 function stopTimer(el) {
@@ -2164,16 +2384,42 @@ function note(text, bad, retry) {
    excerpts it actually used, but the marks are noise to read: the chips below
    the answer say the same thing. So they come out at render time, leaving the
    stored answer intact. */
-const CITED_FILE = /\s*\[[^\]\n]*\.(?:pdf|md|markdown|txt|csv|json|docx?|pptx?|png|jpe?g|webp|gif|mp[34]|wav|mov)[^\]\n]*\](?!\()/gi;
+/* Models copy the label but not always its brackets: some cite in the
+   lenticular brackets their training uses, or fullwidth ones, with a narrow
+   no-break space inside. Those are the same marks and come out the same way. */
+const OPEN_MARK = '[\\[\\u3010\\u3014\\u3016\\uFF3B]';
+const CLOSE_MARK = '[\\]\\u3011\\u3015\\u3017\\uFF3D]';
+const NOT_CLOSE = '[^\\]\\u3011\\u3015\\u3017\\uFF3D\\n]';
+const CITED_FILE = new RegExp(
+  '\\s*' + OPEN_MARK + NOT_CLOSE +
+  '*\\.(?:pdf|md|markdown|txt|csv|json|docx?|pptx?|png|jpe?g|webp|gif|mp[34]|wav|mov)' +
+  NOT_CLOSE + '*' + CLOSE_MARK + '(?!\\()', 'gi');
+
+/* A mark that dropped its file name, `[lines 9-13]` or `[p. 4]`, because the
+   model had named the file once already. Still a citation, still noise in the
+   prose, and recognisable by the locator alone. Stripping happens before the
+   maths is found, so a mark the model put inside a formula goes too. */
+const LOCATOR_MARK = new RegExp(
+  '\\s*' + OPEN_MARK + '\\s*(?:lines?|ll?\\.|pp?\\.|pages?)\\s*\\d+' +
+  '(?:\\s*[-,\\u2010-\\u2015\\u2212]\\s*\\d+)*\\s*' + CLOSE_MARK + '(?!\\()', 'gi');
+
+const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/* A label as the server knows it, `[file, line 2]`, in any of those bracket
+   shapes and with any kind of space between its words. */
+function labelMark(label) {
+  const words = label.slice(1, -1).trim().split(/\s+/).map(escapeRegex);
+  return new RegExp('\\s*' + OPEN_MARK + '\\s*' + words.join('\\s+') + '\\s*' + CLOSE_MARK, 'g');
+}
 
 function stripCitations(text, citations = []) {
   let out = text;
   for (const c of citations) {
     if (!c.label) continue;
-    // Exact labels first, so nothing depends on the shape of a file name.
-    out = out.split(c.label).join('');
+    // Labels first, so nothing depends on the shape of a file name.
+    out = out.replace(labelMark(c.label), '');
   }
-  return out.replace(CITED_FILE, '').replace(/[ \t]+([.,;:])/g, '$1');
+  return out.replace(CITED_FILE, '').replace(LOCATOR_MARK, '').replace(/[ \t  ]+([.,;:])/g, '$1');
 }
 
 const ACTION_ICON = {
@@ -2464,8 +2710,17 @@ function finishTurn(el, res) {
   const seconds = el.elapsed ? el.elapsed() : 0;
   stopTimer(el);
   el.querySelector('.thinking')?.remove();
-  el.querySelector('.body').innerHTML =
-    markdown(stripCitations(res.answer || '', res.citations));
+  // The steps it took, folded, as stored. An answer from before traces were
+  // kept still has its reasoning, which becomes a single step.
+  const steps = res.trace ?? (res.thinking
+    ? [{ kind: 'thinking', text: res.thinking, ms: res.thinking_ms }] : null);
+  if (steps) drawTrace(el, steps);
+  // A turn can still end with nothing to show, a small model that works and
+  // then stops. Say so where the answer would be, rather than show a blank.
+  el.querySelector('.body').innerHTML = (res.answer || '').trim()
+    ? markdown(stripCitations(res.answer, res.citations))
+    : '<p class="no-answer">No answer came back: the model stopped after working ' +
+      'on it. Retry it, or ask with a different model.</p>';
 
   const meta = document.createElement('div');
   meta.className = 'meta-line';
@@ -2474,12 +2729,10 @@ function finishTurn(el, res) {
   // search happened and none of it was cited.
   const searched = res.excerpts_searched && !(res.citations || []).length
     ? `, ${res.excerpts_searched} excerpts searched` : '';
-  // What it did to get here, when it did more than read what it was handed.
-  const tools = (res.tool_calls || []).length
-    ? ', ' + res.tool_calls.slice(0, 3).join(', ') : '';
+  // What it did on the way is in the trace above the answer, not repeated here.
   model.textContent = res.model_display_name +
     (res.effort && res.effort !== 'off' ? `, ${res.effort} effort` : '') +
-    (seconds ? `, ${seconds}s` : '') + tools + searched;
+    (seconds ? `, ${seconds}s` : '') + searched;
   meta.append(model);
   // One chip per file, not per excerpt: the lines it drew on are on the
   // tooltip, and clicking opens the file at the first of them.
@@ -2629,6 +2882,16 @@ async function runTurn(text) {
   turn.classList.add('live');
   const thinking = turn.querySelector('.thinking');
   const bodyEl = turn.querySelector('.body');
+  // The steps being written right now: a stretch of reasoning still arriving,
+  // or a tool call still running. Whatever comes next closes them.
+  let thinkingStep = null, toolStep = null;
+  const closeThought = () => {
+    if (!thinkingStep) return;
+    const ms = Date.now() - +thinkingStep.dataset.since;
+    thinkingStep.classList.remove('live', 'open');
+    thinkingStep.querySelector('.label').textContent = 'Thought for ' + thoughtFor(ms);
+    thinkingStep = null;
+  };
 
   // Tokens render as they arrive, throttled so a fast model does not re-lay
   // out the page per word. Citations strip at the end, when they are known.
@@ -2647,12 +2910,6 @@ async function runTurn(text) {
     else if (!renderTimer) {
       renderTimer = setTimeout(() => { renderTimer = 0; renderPending(); }, wait);
     }
-  };
-  const toolStatus = t => {
-    const s = document.createElement('div');
-    s.className = 'tool-status';
-    s.textContent = t;
-    turn.append(s);
   };
 
   const fail = e => {
@@ -2716,9 +2973,36 @@ async function runTurn(text) {
         if (event === 'token') {
           pending += msg.t || '';
           thinking?.remove();
+          // The answer has started, so the reasoning before it folds away.
+          closeThought();
           scheduleRender();
+        } else if (event === 'thinking') {
+          thinking?.remove();
+          if (!thinkingStep) {
+            // A new stretch: after a tool call it is a new line, not more of
+            // the last one.
+            thinkingStep = addStep(turn, 'Thinking…', { live: true });
+            thinkingStep.classList.add('thought', 'open');
+            thinkingStep.dataset.since = Date.now();
+          }
+          const detail = thinkingStep.querySelector('.detail');
+          // Follow the newest thought, unless the reader has scrolled up in it.
+          const following = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 24;
+          setDetail(thinkingStep, msg.t || '', { append: true });
+          if (following) detail.scrollTop = detail.scrollHeight;
+          if (nearBottom()) turn.scrollIntoView({ block: 'end' });
         } else if (event === 'tool') {
-          if (msg.t) toolStatus(msg.t);
+          thinking?.remove();
+          closeThought();
+          if (msg.t) toolStep = addStep(turn, toolLabel(msg.t) + '…', { live: true });
+        } else if (event === 'tool_done') {
+          if (toolStep) {
+            toolStep.classList.remove('live');
+            const label = toolStep.querySelector('.label');
+            label.textContent = label.textContent.replace(/…$/, '');
+            setDetail(toolStep, msg.found || '');
+            toolStep = null;
+          }
         } else if (event === 'done') {
           finished = true;
           state.conversationId = msg.conversation_id;
@@ -2726,9 +3010,11 @@ async function runTurn(text) {
           setUrl(msg.conversation_id, { replace: true });
           state.context = { used: msg.context_used, window: msg.context_window };
           renderContext();
-          turn.querySelectorAll('.tool-status').forEach(s => s.remove());
           turn.classList.remove('live');
           attachUserActions(asked, { message_id: msg.user_message_id, text });
+          closeThought();
+          // finishTurn redraws the trace from what the server stored, so the
+          // finished turn reads exactly as it will when reopened.
           finishTurn(turn, msg);
           loadChats();
         } else if (event === 'error') {
@@ -2745,6 +3031,7 @@ async function runTurn(text) {
     if (e.name === 'AbortError') {
       const th = turn.querySelector('.thinking');
       if (th) th.textContent = 'Stopped';
+      closeThought();
       turn.classList.remove('live');
     } else {
       fail(e);
@@ -2923,6 +3210,9 @@ async function openConversation(id, { fromHistory = false } = {}) {
         message_id: m.id,
         compacted: m.compacted,
         created_at: m.created_at,
+        trace: m.trace ? JSON.parse(m.trace) : null,
+        thinking: m.thinking,
+        thinking_ms: m.thinking_ms,
       });
     }
   }
