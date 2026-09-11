@@ -338,6 +338,16 @@ pub async fn get_document(db: &Db, source_id: &str) -> sqlx::Result<Option<Docum
         .await
 }
 
+/// Take the rendition away, chunks and index entries with it, leaving the
+/// source itself in place.
+pub async fn delete_document(db: &Db, source_id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM documents WHERE source_id = ?1")
+        .bind(source_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// One rendition per source: replacing it drops the old chunks with it.
 pub async fn replace_document(
     db: &Db,

@@ -228,6 +228,19 @@ pub async fn ingest_with(
     match &result {
         Ok(()) => db::set_source_status(&state.db, &source.id, "ready", None).await?,
         Err(e) => {
+            /* A stored rendition that is itself a description of the file is
+               exactly what this run set out to replace, and leaving it behind
+               would keep the notebook answering questions about this file with
+               something a model invented, under a source the explorer already
+               marks failed. A rendition that reads as a real transcription
+               stays: a failed rerun is no reason to throw away good work. */
+            if e.is_rendition_failure()
+                && let Ok(Some(stored)) = db::get_document(&state.db, &source.id).await
+                && page_rendition_is_a_summary(&stored.markdown, 1)
+            {
+                tracing::warn!(source = %source.id, "dropping a stale description");
+                db::delete_document(&state.db, &source.id).await?;
+            }
             db::set_source_result(
                 &state.db,
                 &source.id,
@@ -366,6 +379,13 @@ const IMAGE_MAX_PIXELS: u64 = 120_000_000;
 /// How many bytes of a file are enough to say what it is.
 const HEAD_BYTES: usize = 8 * 1024;
 
+/// What a faithful page transcription runs to, per page, at the very least.
+/// A caption of a whole batch of pages comes in far under this.
+const MIN_TRANSCRIPT_CHARS_PER_PAGE: usize = 250;
+/// How much of an extracted text layer a structured rendition should still
+/// carry. Losing more than this means it was summarised, not transcribed.
+const MIN_TEXT_LAYER_KEPT_PERCENT: usize = 40;
+
 /// How much extracted PDF text counts as a real text layer.
 const PDF_TEXT_SUBSTANTIAL: usize = 500;
 /// Cap on extracted text sent to the model for structuring.
@@ -423,6 +443,122 @@ fn check_page_budget(total_pages: usize) -> AppResult<()> {
         )));
     }
     Ok(())
+}
+
+/// Whether a rendition transcribes the pages or merely talks about them.
+///
+/// A small model handed page images will often answer with a caption: "The PDF
+/// contains the 2026 Fall timetable for a university, listing various courses".
+/// Fluent, wrong in the details, and useless as a rendition, since the notebook
+/// then indexes a description of the document instead of the document. Storing
+/// that is worse than failing, because the researcher will quote it.
+///
+/// Three things separate the two. A transcription follows the `## p. N` shape it
+/// was asked for; it does not open by naming the artefact it came from; and it
+/// runs to roughly the length of the pages it covers.
+fn page_rendition_is_a_summary(rendition: &str, pages: usize) -> bool {
+    let body = rendition.trim();
+    if body.is_empty() {
+        return true;
+    }
+    if has_page_headers(body) {
+        return false;
+    }
+    if opens_by_describing(body) {
+        return true;
+    }
+    body.chars().count() < MIN_TRANSCRIPT_CHARS_PER_PAGE * pages.max(1)
+}
+
+/// The same question for a rendition built from an extracted text layer, where
+/// the input is known: a transcription keeps most of what it was given.
+fn text_rendition_is_a_summary(rendition: &str, extracted: &str) -> bool {
+    let kept = rendition.trim().chars().count();
+    if kept == 0 {
+        return true;
+    }
+    if opens_by_describing(rendition.trim()) {
+        return true;
+    }
+    let given = extracted.trim().chars().count().min(PDF_TEXT_INPUT_MAX);
+    given > 0 && kept * 100 < given * MIN_TEXT_LAYER_KEPT_PERCENT
+}
+
+/// `## p. 4`, `### Page 4`, and the other shapes a model reaches for when it is
+/// transcribing page by page as asked.
+fn has_page_headers(body: &str) -> bool {
+    body.lines().any(|line| {
+        let line = line.trim_start();
+        let Some(rest) = line.strip_prefix('#') else { return false };
+        let rest = rest.trim_start_matches('#').trim_start().to_ascii_lowercase();
+        let rest = rest
+            .strip_prefix("page")
+            .or_else(|| rest.strip_prefix("p."))
+            .or_else(|| rest.strip_prefix('p'))
+            .unwrap_or("");
+        rest.trim_start_matches([' ', '.', ':']).starts_with(|c: char| c.is_ascii_digit())
+    })
+}
+
+/// An answer that begins by naming the thing it was given is describing it.
+/// Nobody's page begins "This PDF contains".
+fn opens_by_describing(body: &str) -> bool {
+    let opening: String = body
+        .chars()
+        .filter(|c| !matches!(c, '#' | '*' | '>' | '`' | '_'))
+        .take(60)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let opening = opening.trim_start();
+    let Some(rest) = opening
+        .strip_prefix("the ")
+        .or_else(|| opening.strip_prefix("this "))
+        .or_else(|| opening.strip_prefix("here is the "))
+        .or_else(|| opening.strip_prefix("here is a "))
+    else {
+        return false;
+    };
+    [
+        "pdf", "document", "file", "image", "images", "page", "pages", "screenshot",
+        "slide", "slides", "attachment", "text",
+    ]
+    .iter()
+    .any(|subject| {
+        rest.strip_prefix(subject)
+            .is_some_and(|tail| tail.starts_with(' ') || tail.starts_with(','))
+    })
+}
+
+/// What to say when the endpoint refuses the kind of content outright.
+///
+/// This is a configuration problem, not a file problem, and the fix is exact:
+/// the model is marked as taking images and does not. Say which model, quote
+/// what the endpoint said, and name both ways out.
+fn modality_error(resolved: &crate::models::Resolved, media: &str, cause: &AppError) -> AppError {
+    let model = &resolved.model.display_name;
+    let said = cause.provider_message();
+    AppError::Modality {
+        message: format!(
+            "the analyzer model {model} does not accept {media}: the endpoint said \
+             \"{said}\". This file cannot be read without them, so run it on a model \
+             that takes them, and clear the vision flag on {model} so it is not tried \
+             again"
+        ),
+        model_id: Some(resolved.model.id.clone()),
+        model_name: Some(model.clone()),
+        media: media.to_string(),
+    }
+}
+
+/// What to say when the model will not transcribe. Every other path asks the
+/// same model, so the answer is a different model, not a different prompt.
+fn summarised_error(model: &str, what: &str) -> AppError {
+    AppError::Rendition(format!(
+        "the analyzer model {model} answered with a description of {what} rather than \
+         a transcription, so there is no rendition to store; a rendition has to be \
+         the document's own words. Pin a stronger analyzer model in Configure and \
+         reingest this file"
+    ))
 }
 
 /// Images, audio and video: the analyzer model looks at the original bytes.
@@ -503,7 +639,16 @@ async fn analyze_media(
     .effort(models::effort(&state.db, &state.user_id).await?);
 
     let text = analyzer_chat(state, &resolved, &req, &format!(" on this {} file", kind.as_str()))
-        .await?;
+        .await
+        .map_err(|e| {
+            // An omni model is not the default anywhere, and "unknown variant
+            // `audio_url`" tells a person nothing about what to do next.
+            if e.is_modality_refusal() {
+                modality_error(&resolved, &format!("{} files", kind.as_str()), &e)
+            } else {
+                e
+            }
+        })?;
     if text.trim().is_empty() {
         return Err(AppError::Unsupported(format!(
             "the analyzer model returned no text for this {} file; \
@@ -624,8 +769,11 @@ async fn analyze_page_images(
         )
         .await
         .map_err(|e| match e {
-            // A rate limit keeps its own shape; anything else is a page failure.
-            rate @ AppError::RateLimited { .. } => rate,
+            // A rate limit keeps its own shape, and so does a refusal of images
+            // as such: both mean something to the caller, and wrapping them in
+            // prose about page numbers would throw that away and read worse.
+            keep @ AppError::RateLimited { .. } => keep,
+            keep if keep.is_modality_refusal() => keep,
             other => AppError::Unsupported(format!(
                 "page-image analysis failed on pages {first} to {last}: {other}"
             )),
@@ -635,6 +783,12 @@ async fn analyze_page_images(
                 "the analyzer model returned no text for pages {first} to {last}; \
                  try a different analyzer model"
             )));
+        }
+        // A model that answers with a description of the pages has not
+        // transcribed them, and a description stored as a rendition is worse
+        // than no rendition: it reads as the document and is not.
+        if page_rendition_is_a_summary(&text, batch.len()) {
+            return Err(summarised_error(&resolved.model.display_name, "these pages"));
         }
         sections.push(text);
         start = batch_end;
@@ -712,7 +866,42 @@ async fn structure_text_layer(
                 .into(),
         ));
     }
+    // The input is known here, so a rendition that dropped most of it was a
+    // summary however confidently it reads.
+    if text_rendition_is_a_summary(&text, extracted) {
+        return Err(summarised_error(&resolved.model.display_name, "this text"));
+    }
     Ok((text, Some(resolved.model.model_id.clone())))
+}
+
+/// Structure the text layer, and if the model will not do that either, store
+/// the text layer as it came out of the file.
+///
+/// A plain rendition that is true beats a fluent one that is not: the notebook
+/// can still search it, cite it and show it, and nothing in it was invented.
+/// The note at the top says what happened, so the file is not silently second
+/// rate.
+async fn text_layer_fallback(
+    state: &AppState,
+    resolved: &crate::models::Resolved,
+    filename: &str,
+    extracted: &str,
+) -> AppResult<(String, Option<String>)> {
+    match structure_text_layer(state, resolved, filename, extracted).await {
+        Ok(done) => Ok(done),
+        Err(e) if e.is_rate_limited() => Err(e),
+        Err(e) => {
+            tracing::warn!(error = %e, "storing the raw text layer instead");
+            Ok((
+                format!(
+                    "> The analyzer model would not transcribe this file, so this \
+                     rendition is the PDF's own text layer, unedited. Reingest with a \
+                     stronger analyzer model for a structured one.\n\n{extracted}"
+                ),
+                None,
+            ))
+        }
+    }
 }
 
 /// Send the document natively. Some endpoints take this; others reject the
@@ -752,7 +941,18 @@ async fn analyze_native_document(
     .max_tokens(resolved.model.max_output_tokens.max(1024) as u32)
     .effort(models::effort(&state.db, &state.user_id).await?);
 
-    let text = analyzer_chat(state, resolved, &req, " while reading the PDF document").await?;
+    let text = analyzer_chat(state, resolved, &req, " while reading the PDF document")
+        .await
+        .map_err(|e| {
+            if e.is_modality_refusal() {
+                modality_error(resolved, "PDF documents", &e)
+            } else {
+                e
+            }
+        })?;
+    if page_rendition_is_a_summary(&text, 1) {
+        return Err(summarised_error(&resolved.model.display_name, "this document"));
+    }
     if text.trim().is_empty() {
         return Err(AppError::Unsupported(
             "the analyzer model returned no text for this PDF; try a different \
@@ -822,6 +1022,25 @@ async fn analyze_pdf(
                 // that is out of capacity would only fail again, more slowly,
                 // and end up reported as an unreadable file.
                 Err(pages_err) if pages_err.is_rate_limited() => return Err(pages_err),
+                // Nor is there any point asking the same model to describe the
+                // same file another way. Only the file's own text is left.
+                Err(pages_err) if pages_err.is_rendition_failure() => {
+                    return if has_text {
+                        text_layer_fallback(state, &resolved, filename, &extracted).await
+                    } else {
+                        Err(pages_err)
+                    };
+                }
+                /* The endpoint has said this model does not take images. The
+                   native document part is the same kind of refusal one step
+                   later, and on endpoints that do not implement it at all the
+                   second error is worse than the first, so it is not tried. */
+                Err(pages_err) if pages_err.is_modality_refusal() => {
+                    if has_text {
+                        return text_layer_fallback(state, &resolved, filename, &extracted).await;
+                    }
+                    return Err(modality_error(&resolved, "page images", &pages_err));
+                }
                 Err(pages_err) => {
                     tracing::warn!(error = %pages_err, "page images failed, trying native document");
                     match analyze_native_document(state, &resolved, source, filename, &bytes)
@@ -830,13 +1049,8 @@ async fn analyze_pdf(
                         Ok(done) => return Ok(done),
                         Err(doc_err) if doc_err.is_rate_limited() => return Err(doc_err),
                         Err(_) if has_text => {
-                            return structure_text_layer(
-                                state,
-                                &resolved,
-                                filename,
-                                &extracted,
-                            )
-                            .await;
+                            return text_layer_fallback(state, &resolved, filename, &extracted)
+                                .await;
                         }
                         Err(_) => return Err(honest_pdf_error(&pages_err)),
                     }
@@ -848,14 +1062,14 @@ async fn analyze_pdf(
             Ok(done) => return Ok(done),
             Err(doc_err) if doc_err.is_rate_limited() => return Err(doc_err),
             Err(_) if has_text => {
-                return structure_text_layer(state, &resolved, filename, &extracted).await;
+                return text_layer_fallback(state, &resolved, filename, &extracted).await;
             }
             Err(doc_err) => return Err(honest_pdf_error(&doc_err)),
         }
     }
 
     // Only a non-vision model with a usable text layer reaches here.
-    structure_text_layer(state, &resolved, filename, &extracted).await
+    text_layer_fallback(state, &resolved, filename, &extracted).await
 }
 
 /// "12/177" back into numbers.
@@ -867,10 +1081,13 @@ fn parse_progress(progress: &str) -> Option<(usize, usize)> {
 /// What the user sees when every PDF path failed: the provider's own words,
 /// plus what to do about it. Never a guess presented as a rendition.
 fn honest_pdf_error(cause: &AppError) -> AppError {
+    // One sentence a person can act on, with the provider's own words in it
+    // rather than the JSON they arrived in.
     AppError::Unsupported(format!(
-        "the analyzer endpoint could not read this PDF ({cause}). The file has \
-         no usable text layer and the endpoint rejected the document itself; \
-         pin a model whose endpoint takes page images or PDF documents"
+        "the analyzer endpoint could not read this PDF: {}. The file has no usable \
+         text layer and the endpoint took neither page images nor the document \
+         itself; pin a model whose endpoint takes one of them",
+        cause.provider_message()
     ))
 }
 
@@ -1306,6 +1523,76 @@ fn kind_of(source: &Source) -> Kind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Verbatim, from smolvlm2-2.2b-instruct handed a one page timetable. It
+    /// reads well and is wrong: "PHL" is philosophy, not "Person".
+    const CAPTION: &str = "The PDF contains the 2026 Fall timetable for a \
+university, listing various courses and their corresponding times on weekdays. \
+The schedule is organized by days of the week from Monday to Friday, with each \
+day having a list of courses starting at different times. The courses are listed \
+in columns under \"PHL\" (Person), indicating that they are taught by a specific \
+person or group. The timetable also includes information about the location and \
+time duration for each course.";
+
+    #[test]
+    fn a_caption_is_not_a_rendition() {
+        assert!(page_rendition_is_a_summary(CAPTION, 1));
+        // Long enough to pass a length test on its own, so the opening is what
+        // has to catch it.
+        assert!(CAPTION.len() > MIN_TRANSCRIPT_CHARS_PER_PAGE);
+
+        for opening in [
+            "This document is a syllabus for PHL245.",
+            "The image shows a weekly timetable.",
+            "Here is the PDF, summarised for you:",
+            "**The file contains** three sections.",
+        ] {
+            assert!(page_rendition_is_a_summary(opening, 1), "{opening}");
+        }
+    }
+
+    #[test]
+    fn a_transcription_is_left_alone() {
+        let transcribed = "## p. 1\n\nPHL245H5F LEC0101 Mon 10:00 to 12:00 IB 345\n";
+        assert!(!page_rendition_is_a_summary(transcribed, 1));
+        // Page headers carry it even for a nearly empty page, which is exactly
+        // what a title page or a blank one looks like.
+        assert!(!page_rendition_is_a_summary("### Page 7\n\n(blank)", 1));
+        assert!(!page_rendition_is_a_summary("# p.12\n\nnothing here", 1));
+
+        // No headers, but plainly a transcription: it is long, and it does not
+        // start by naming the file.
+        let long = "PHL245H5F LEC0101 Monday 10:00 to 12:00 room IB 345. "
+            .repeat(12);
+        assert!(!page_rendition_is_a_summary(&long, 1));
+
+        // A sentence that merely mentions a document is not an opening about one.
+        assert!(!page_rendition_is_a_summary(
+            &("Theorem 4. The document of a divisor is defined as follows. ".repeat(8)),
+            1
+        ));
+    }
+
+    #[test]
+    fn one_paragraph_for_a_whole_batch_is_a_summary() {
+        // Eight pages of lecture notes do not fit in three sentences.
+        let thin = "Slides about groups, rings and fields, with examples. ".repeat(6);
+        assert!(page_rendition_is_a_summary(&thin, 8));
+        assert!(!page_rendition_is_a_summary(&thin, 1));
+    }
+
+    #[test]
+    fn a_structured_text_layer_has_to_keep_the_text() {
+        let extracted = "Course PHL245H5F meets Mondays at ten. ".repeat(60);
+        let faithful = "Course PHL245H5F meets Mondays at ten. ".repeat(50);
+        let boiled_down = "The document lists courses and times.";
+
+        assert!(!text_rendition_is_a_summary(&faithful, &extracted));
+        assert!(text_rendition_is_a_summary(boiled_down, &extracted));
+        assert!(text_rendition_is_a_summary("", &extracted));
+        // Nothing to compare against means the length test cannot fire.
+        assert!(!text_rendition_is_a_summary("a short note", ""));
+    }
 
     #[test]
     fn an_impossible_page_count_is_refused_not_truncated() {

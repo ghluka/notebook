@@ -700,8 +700,10 @@ async function loadTree() {
     if (!before || before === s.status) continue;
     if (s.status === 'failed') {
       const detail = s.error_detail ? JSON.parse(s.error_detail) : {};
-      if (detail.kind === 'rate_limited') {
-        analyzerFailed(s, { message: s.error, payload: detail });
+      // A failure the client can do something about gets the dialog that does
+      // it; everything else is a line in the thread.
+      if (detail.kind === 'rate_limited' || detail.kind === 'modality') {
+        analyzerFailed(s, { message: detail.error || s.error, payload: detail });
       } else {
         note(`${s.title}: ${s.error}`, true);
       }
@@ -1277,25 +1279,35 @@ function folderMenu(e, folder) {
 /* The server waits out a rate limit on its own schedule. When the provider is
    still refusing after that, the decision is a person's: run this file on a
    different model, or leave it. */
+/* Two failures are worth offering a way out of rather than just reporting:
+   a provider that ran out of capacity, and a model that will not take the kind
+   of content the file needs. Both come down to the same question, which model
+   should read this instead, so both ask it the same way. */
 async function analyzerFailed(source, error) {
   const payload = error.payload || {};
-  if (payload.kind !== 'rate_limited') {
+  const kind = payload.kind;
+  if (kind !== 'rate_limited' && kind !== 'modality') {
     note(`${source.title}: ${error.message}`, true);
     return;
   }
 
+  const title = kind === 'modality' ? 'This model cannot read that' : 'Rate limited';
   let candidates = [];
   try {
     const { models } = await api('/api/models');
+    // A file that needs looking at needs a model that can look at it, and in
+    // either case not the one that just failed.
     candidates = models.filter(m => m.supports_vision && m.id !== payload.model_id);
   } catch (e) {
     note(e.message, true);
   }
 
   if (!candidates.length) {
-    await say(`${error.message}\n\nNo other vision-capable model is configured. ` +
-              'Add one in Configure, or try again when the provider is quieter.',
-              'Rate limited');
+    const advice = kind === 'modality'
+      ? 'No other vision-capable model is configured. Add one in Configure.'
+      : 'No other vision-capable model is configured. Add one in Configure, or ' +
+        'try again when the provider is quieter.';
+    await say(`${error.message}\n\n${advice}`, title);
     return;
   }
 
@@ -1304,10 +1316,10 @@ async function analyzerFailed(source, error) {
     label: `${m.display_name} (${m.provider_name})`,
   }));
   const pick = await askChoice(
-    'Rate limited',
+    title,
     `${error.message}\n\nRun "${source.title}" on a different model instead?`,
     choices,
-    'Retry on this model',
+    kind === 'modality' ? 'Run on this model' : 'Retry on this model',
   );
   if (!pick) return;
 

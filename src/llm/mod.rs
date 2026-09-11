@@ -59,12 +59,102 @@ impl LlmError {
         matches!(self, LlmError::RateLimited { .. })
     }
 
+    /// Whether the endpoint said, in whatever words, that this model cannot
+    /// take this kind of content at all.
+    ///
+    /// It is worth telling apart because no amount of retrying, and no other
+    /// way of sending the same file, will change the answer: the fix is a
+    /// different model.
+    pub fn rejects_modality(&self) -> bool {
+        match self {
+            LlmError::Api { status, body, .. } => {
+                (*status == 400 || *status == 415 || *status == 422)
+                    && mentions_unsupported_modality(body)
+            }
+            _ => false,
+        }
+    }
+
+    /// The sentence a person should read, dug out of whatever JSON the
+    /// provider wrapped it in. Providers bury it in `error.message`,
+    /// `message`, or `detail`; some just send prose.
+    pub fn provider_message(&self) -> String {
+        let body = match self {
+            LlmError::Api { body, .. } | LlmError::RateLimited { body, .. } => body.as_str(),
+            other => return other.to_string(),
+        };
+        human_message(body)
+    }
+
     fn retry_after(&self) -> Option<u64> {
         match self {
             LlmError::Api { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
+}
+
+/// Pull the human sentence out of a provider error body.
+fn human_message(body: &str) -> String {
+    let trimmed = body.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        let candidates = [
+            value.pointer("/error/message"),
+            value.pointer("/message"),
+            value.pointer("/detail"),
+            value.pointer("/error"),
+            value.pointer("/error/0/message"),
+        ];
+        for found in candidates.into_iter().flatten() {
+            if let Some(text) = found.as_str()
+                && !text.trim().is_empty()
+            {
+                return tidy(text);
+            }
+        }
+    }
+    tidy(trimmed)
+}
+
+/// One line, no runaway payloads.
+fn tidy(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flat.trim_end_matches(['.', ' ']).to_string();
+    if flat.chars().count() > 300 {
+        let cut: String = flat.chars().take(300).collect();
+        format!("{cut}...")
+    } else {
+        flat
+    }
+}
+
+/// The many ways an endpoint says "not that kind of content".
+///
+/// The first two are real answers this project has been given: NVIDIA's hosted
+/// endpoint for a text-only model, and LM Studio faced with an OpenAI `file`
+/// part it does not implement.
+fn mentions_unsupported_modality(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+    let refusal = [
+        "does not support image",
+        "do not support image",
+        "does not support vision",
+        "image input",
+        "image_input",
+        "does not support audio",
+        "does not support video",
+        "unsupported content",
+        "unsupported media",
+        "content type is not supported",
+        "must have a 'type' field",
+        "must have a \"type\" field",
+        "unknown variant",
+        "invalid content type",
+        "multimodal",
+        "not a vision",
+        "no vision",
+    ];
+    refusal.iter().any(|m| body.contains(m))
 }
 
 /// Providers phrase exhaustion differently and not all of them use a 429.
@@ -275,6 +365,59 @@ pub fn part_for_file(media_type: &str, bytes: &[u8], filename: Option<&str>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NVIDIA's hosted endpoint, asked to look at a page image with a text
+    /// only model.
+    const NO_IMAGES: &str = r#"{ "error": { "message": "The provided messages contain images, but nvidia/nemotron-3-nano-4b does not support image inputs.", "type": "invalid_request_error", "param": "messages", "code": "invalid_value" } }"#;
+
+    /// LM Studio, handed the OpenAI `file` part it does not implement.
+    const NO_FILE_PART: &str =
+        r#"{"error":"Invalid 'content': 'content' objects must have a 'type' field that is either 'text' or 'image_url'"}"#;
+
+    /// vLLM style, handed an `audio_url` part by a model that has no ears.
+    const NO_AUDIO: &str = r#"{"error":{"message":"Failed to deserialize the JSON body into the target type: messages[1]: unknown variant `audio_url`, expected one of `text`, `image_url`","type":"invalid_request_error"}}"#;
+
+    fn api(status: u16, body: &str) -> LlmError {
+        LlmError::Api { status, body: body.to_string(), retry_after: None }
+    }
+
+    #[test]
+    fn a_refusal_of_the_content_kind_is_told_apart() {
+        assert!(api(400, NO_IMAGES).rejects_modality());
+        assert!(api(400, NO_FILE_PART).rejects_modality());
+        assert!(api(400, NO_AUDIO).rejects_modality());
+
+        // A refusal of the content kind is not a rate limit and not retryable:
+        // the same request will be refused for ever.
+        assert!(!api(400, NO_IMAGES).is_retryable());
+
+        // Ordinary failures are not mistaken for it.
+        assert!(!api(400, r#"{"error":{"message":"invalid api key"}}"#).rejects_modality());
+        assert!(!api(429, r#"{"error":{"message":"rate limit exceeded"}}"#).rejects_modality());
+        assert!(!api(500, NO_IMAGES).rejects_modality(), "a server fault is not a refusal");
+    }
+
+    #[test]
+    fn the_providers_own_sentence_comes_out_of_the_json() {
+        // The sentence, whole, with the JSON and the trailing full stop gone.
+        let images = api(400, NO_IMAGES).provider_message();
+        assert!(images.starts_with("The provided messages contain images"), "{images}");
+        assert!(images.ends_with("does not support image inputs"), "{images}");
+        assert!(!images.contains('{'), "{images}");
+
+        let part = api(400, NO_FILE_PART).provider_message();
+        assert!(part.starts_with("Invalid 'content'"), "{part}");
+        assert!(part.ends_with("either 'text' or 'image_url'"), "{part}");
+        // Prose, or a shape nobody recognises, comes back as it is.
+        assert_eq!(api(502, "  upstream is down  ").provider_message(), "upstream is down");
+        assert_eq!(api(400, "{}").provider_message(), "{}");
+
+        // A wall of payload is cut to something readable.
+        let huge = format!(r#"{{"error":{{"message":"{}"}}}}"#, "x".repeat(900));
+        let message = api(400, &huge).provider_message();
+        assert!(message.chars().count() <= 303, "{}", message.len());
+        assert!(message.ends_with("..."));
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Fails `fail_times` times with `status` and `body`, then succeeds.

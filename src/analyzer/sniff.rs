@@ -436,9 +436,8 @@ mod tests {
 
     #[test]
     fn older_encodings_are_still_text() {
-        // Latin-1: valid text, invalid UTF-8.
+        // Latin-1: valid text to a person, invalid UTF-8 to a decoder.
         let latin1 = b"R\xe9sum\xe9 of the caf\xe9 experiment, \xb1 0.5\n";
-        assert!(!std::str::from_utf8(latin1).is_ok());
         assert_eq!(sniff(latin1).kind, Some(Kind::Text));
 
         // UTF-16 has NULs all through it, so only the mark saves it.

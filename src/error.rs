@@ -15,6 +15,11 @@ pub enum AppError {
     NotFound(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// The model read the file and answered with something that is not a
+    /// rendition of it, such as a summary. Retrying the same model on another
+    /// path would only produce the same thing, so this is worth telling apart.
+    #[error("{0}")]
+    Rendition(String),
     #[error("database: {0}")]
     Db(#[from] sqlx::Error),
     #[error("io: {0}")]
@@ -29,6 +34,17 @@ pub enum AppError {
         model_id: Option<String>,
         model_name: Option<String>,
         waited: u64,
+    },
+    /// The endpoint will not take this kind of content from this model. The
+    /// client can offer to run the file on another model that will, which is
+    /// the same shape of choice a rate limit offers.
+    #[error("{message}")]
+    Modality {
+        message: String,
+        model_id: Option<String>,
+        model_name: Option<String>,
+        /// What it would not take: "page images", "audio files".
+        media: String,
     },
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
@@ -46,12 +62,37 @@ impl AppError {
                 "model_name": model_name,
                 "waited_seconds": waited,
             }),
+            AppError::Modality { message, model_id, model_name, media } => json!({
+                "error": message,
+                "kind": "modality",
+                "model_id": model_id,
+                "model_name": model_name,
+                "media": media,
+            }),
             other => json!({ "error": other.to_string() }),
         }
     }
 
     pub fn is_rate_limited(&self) -> bool {
         matches!(self, AppError::RateLimited { .. })
+    }
+
+    pub fn is_rendition_failure(&self) -> bool {
+        matches!(self, AppError::Rendition(_))
+    }
+
+    /// The endpoint refused the kind of content, not the request. Sending the
+    /// same file another way to the same model only earns the same refusal.
+    pub fn is_modality_refusal(&self) -> bool {
+        matches!(self, AppError::Llm(e) if e.rejects_modality())
+    }
+
+    /// What the provider actually said, for messages meant to be read.
+    pub fn provider_message(&self) -> String {
+        match self {
+            AppError::Llm(e) => e.provider_message(),
+            other => other.to_string(),
+        }
     }
 
     /// Wrap a provider rate limit with the model it happened on.
@@ -82,7 +123,9 @@ impl IntoResponse for AppError {
         let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
-            AppError::Unsupported(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            AppError::Unsupported(_)
+            | AppError::Rendition(_)
+            | AppError::Modality { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::Llm(crate::llm::LlmError::MissingKey(_)) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::RateLimited { .. } => StatusCode::TOO_MANY_REQUESTS,
             AppError::Llm(crate::llm::LlmError::RateLimited { .. }) => {
@@ -94,5 +137,49 @@ impl IntoResponse for AppError {
             tracing::error!(error = %self, "request failed");
         }
         (status, Json(self.payload())).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The client keys off `kind`, so these payloads are a contract.
+    #[test]
+    fn a_failure_the_client_can_act_on_says_so() {
+        let modality = AppError::Modality {
+            message: "the analyzer model Nemotron 3 Nano 4b does not accept page images".into(),
+            model_id: Some("m-1".into()),
+            model_name: Some("Nemotron 3 Nano 4b".into()),
+            media: "page images".into(),
+        };
+        let payload = modality.payload();
+        assert_eq!(payload["kind"], "modality");
+        assert_eq!(payload["model_id"], "m-1");
+        assert_eq!(payload["media"], "page images");
+        assert!(payload["error"].as_str().unwrap().contains("does not accept page images"));
+        assert!(!modality.is_modality_refusal(), "this is the refusal itself, not one carrying an LlmError");
+
+        // An ordinary failure carries no kind, so the client just reports it.
+        let plain = AppError::Unsupported("no".into());
+        assert!(plain.payload().get("kind").is_none());
+    }
+
+    #[test]
+    fn a_provider_refusal_is_recognised_through_the_app_error() {
+        let refusal = AppError::Llm(crate::llm::LlmError::Api {
+            status: 400,
+            body: r#"{"error":{"message":"model does not support image inputs"}}"#.into(),
+            retry_after: None,
+        });
+        assert!(refusal.is_modality_refusal());
+        assert_eq!(refusal.provider_message(), "model does not support image inputs");
+
+        let other = AppError::Llm(crate::llm::LlmError::Api {
+            status: 401,
+            body: r#"{"error":{"message":"invalid api key"}}"#.into(),
+            retry_after: None,
+        });
+        assert!(!other.is_modality_refusal());
     }
 }
