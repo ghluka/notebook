@@ -32,9 +32,20 @@ const HITS_PER_SEARCH: i64 = 8;
 /// Chunks either side of a hit, so a passage is not cut in half.
 const NEIGHBOUR_RADIUS: i64 = 1;
 /// Cap on one `read_source` slice, so a long rendition is paged, not dumped.
-const READ_MAX_CHARS: usize = 24_000;
-/// Lines per `read_source` call when the model does not say.
-const READ_DEFAULT_LINES: usize = 220;
+/// Scales with the model's window: a small window keeps the old 24k ceiling,
+/// a huge one may take up to 200k characters (tens of thousands of tokens) in
+/// a single read instead of sipping a textbook a page at a time.
+const READ_MAX_CHARS: usize = 200_000;
+const READ_MIN_CHARS: usize = 24_000;
+/// Lines per `read_source` call. The default reaches the end of what fits, so
+/// one read from line 1 covers a short file whole; the character cap above is
+/// what actually bounds a call.
+const READ_DEFAULT_LINES: usize = 2000;
+const READ_MAX_LINES: usize = 2000;
+
+fn read_max_chars(budget_chars: usize) -> usize {
+    (budget_chars / 4).clamp(READ_MIN_CHARS, READ_MAX_CHARS)
+}
 
 const SYSTEM: &str = "\
 You are the researcher in a notebook of the user's own sources, in an ongoing \
@@ -156,7 +167,9 @@ fn researcher_tools(attached: &[String]) -> Vec<Tool> {
                  numbers. This is how you follow a citation: an excerpt from \
                  line 249 means the example, proof or table you want is \
                  probably within a page of line 249. Prefer this over giving \
-                 up."
+                 up. To summarize or explain a whole file, read it from line \
+                 1 without a line limit and keep going until the reply shows \
+                 the final line; short files come back whole in one call."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -168,11 +181,12 @@ fn researcher_tools(attached: &[String]) -> Vec<Tool> {
                     "from_line": {
                         "type": "integer",
                         "description": "First line to read. Start a page before \
-                                        the line you saw."
+                                        the line you saw, or at 1 for the whole file."
                     },
                     "lines": {
                         "type": "integer",
-                        "description": "How many lines to read, default 220."
+                        "description": "How many lines to read. Leave out to \
+                                        read to the end of what fits."
                     }
                 },
                 "required": ["title"]
@@ -333,6 +347,39 @@ fn echoed_hits<'a>(answer: &str, hits: &'a [SearchHit]) -> Vec<&'a SearchHit> {
     best.into_iter().map(|(hit, _)| hit).collect()
 }
 
+/// Find a source by the name the model was given. Titles in the catalogue
+/// carry extensions and number prefixes ("02SetsAndPropositions.pdf") while
+/// the model quotes the human name ("Sets and Propositions"), so after exact
+/// and substring matching, alphanumeric-only lowercase forms are compared.
+fn match_source_by_title<'a>(
+    briefs: &'a [db::SourceBrief],
+    title: &str,
+) -> Option<&'a db::SourceBrief> {
+    let want = title.trim();
+    if want.is_empty() {
+        return None;
+    }
+    briefs
+        .iter()
+        .find(|b| b.title.eq_ignore_ascii_case(want))
+        .or_else(|| {
+            let lower = want.to_lowercase();
+            briefs.iter().find(|b| b.title.to_lowercase().contains(&lower))
+        })
+        .or_else(|| {
+            let flat: String =
+                want.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+            if flat.is_empty() {
+                return None;
+            }
+            briefs.iter().find(|b| {
+                let own: String =
+                    b.title.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+                own.contains(&flat) || flat.contains(&own)
+            })
+        })
+}
+
 /// Run one tool call and describe the result the way an excerpt is described,
 /// so anything the model reads can be cited the same way.
 async fn run_tool(
@@ -368,14 +415,7 @@ async fn run_tool(
                 as usize;
 
             let briefs = db::source_briefs(&state.db, &state.user_id).await?;
-            let found = briefs
-                .iter()
-                .find(|b| b.title.eq_ignore_ascii_case(title.trim()))
-                .or_else(|| {
-                    briefs.iter().find(|b| {
-                        b.title.to_lowercase().contains(&title.trim().to_lowercase())
-                    })
-                });
+            let found = match_source_by_title(&briefs, title);
             let Some(brief) = found else {
                 return Ok(format!(
                     "No source called \"{title}\". Call list_sources to see the names."
@@ -387,8 +427,8 @@ async fn run_tool(
                 &state.user_id,
                 &brief.id,
                 from_line,
-                lines.min(600),
-                READ_MAX_CHARS.min(budget_chars),
+                lines.min(READ_MAX_LINES),
+                read_max_chars(budget_chars),
             )
             .await?;
             let Some(slice) = slice else {
@@ -513,9 +553,23 @@ async fn prepare_turn(
             body.source_ids.len()
         )
     };
+    // The model cannot read what it does not know exists. A keyword search
+    // never lists the files, so the catalogue goes in up front: titles are
+    // what `read_source` takes.
+    let catalogue = render_catalogue(&db::source_briefs(&state.db, &state.user_id).await?);
     messages.push(Message::user(format!(
-        "{attachment_note}A keyword search on this message found these passages. \
-         Search again or read a source if they are not enough.\n{}\n\n---\n\n\
+        "{attachment_note}{catalogue}\n\nA keyword search on this message found \
+         these passages. Search again or read a source if they are not \
+         enough. If the question names a file by order or description instead \
+         of title (\"the second reading\"), resolve it through the file list \
+         above: read the index-like file first (a readings list, the \
+         syllabus), then read the file it points to. Never declare anything \
+         absent until you have consulted the file list and read the most \
+         plausible file; one keyword search is never enough for that. When \
+         asked to summarize, explain, or work through a source, read the \
+         whole file first: every reply tells you \"lines X to Y of Z\"; keep \
+         reading from the next line until Y reaches Z, and only then answer \
+         from everything you read.\n{}\n\n---\n\n\
          Question: {}",
         render_excerpts(&seen, budget_chars),
         body.message
@@ -529,6 +583,25 @@ async fn prepare_turn(
         PreparedTurn { existing, resolved, effort, budget_chars, seen, messages, tools },
         client,
     ))
+}
+
+/// Every file in the notebook, as the model sees it before searching. Titles
+/// are what `read_source` takes, so the model can go from "the second
+/// reading" to the right file without guessing.
+fn render_catalogue(briefs: &[db::SourceBrief]) -> String {
+    if briefs.is_empty() {
+        return "Files in the notebook: none yet.".to_string();
+    }
+    let mut out = String::from("Files in the notebook:\n");
+    for b in briefs {
+        let summary: String =
+            b.summary.as_deref().unwrap_or("no summary").chars().take(120).collect();
+        out.push_str(&format!(
+            "\n- {} ({}, {}, {} lines): {}",
+            b.title, b.kind, b.status, b.total_lines, summary
+        ));
+    }
+    out
 }
 
 /// What one model round produced, however it arrived.
@@ -1144,5 +1217,59 @@ mod tests {
         assert!(rx.try_next().unwrap().is_some());
         assert!(rx.try_next().unwrap().is_some());
         assert!(rx.try_next().is_err(), "only the two tokens were sent");
+    }
+
+    fn brief(title: &str) -> db::SourceBrief {
+        db::SourceBrief {
+            id: format!("id-{title}"),
+            title: title.into(),
+            kind: "pdf".into(),
+            status: "ready".into(),
+            summary: None,
+            total_lines: 100,
+        }
+    }
+
+    #[test]
+    fn read_caps_scale_with_the_window_without_regressing_small_ones() {
+        // A million-token window: a quarter of its characters per read.
+        assert_eq!(read_max_chars(400_000), 100_000);
+        // A 32k window keeps the old ceiling.
+        assert_eq!(read_max_chars(32_768 * 4 / 3), READ_MIN_CHARS);
+        // Absurd windows stop at the hard cap.
+        assert_eq!(read_max_chars(10_000_000), READ_MAX_CHARS);
+    }
+
+    #[test]
+    fn catalogue_lists_every_file_for_the_model() {
+        let out = render_catalogue(&[brief("readings.md"), brief("01HowToRead.pdf")]);
+        assert!(out.contains("readings.md (pdf, ready, 100 lines)"));
+        assert!(out.contains("01HowToRead.pdf"));
+        assert!(render_catalogue(&[]).contains("none yet"));
+    }
+
+    #[test]
+    fn a_human_title_finds_its_numbered_file() {
+        let briefs = vec![
+            brief("02SetsAndPropositions.pdf"),
+            brief("03LogicCont.pdf"),
+            brief("readings.md"),
+        ];
+        // "Sets and Propositions" is neither exact nor a substring, only a
+        // normalized match.
+        assert_eq!(
+            match_source_by_title(&briefs, "Sets and Propositions").unwrap().title,
+            "02SetsAndPropositions.pdf"
+        );
+        assert_eq!(
+            match_source_by_title(&briefs, "readings.md").unwrap().title,
+            "readings.md"
+        );
+        assert_eq!(
+            match_source_by_title(&briefs, "logic").unwrap().title,
+            "03LogicCont.pdf"
+        );
+        assert!(match_source_by_title(&briefs, "no such file").is_none());
+        assert!(match_source_by_title(&briefs, "   ").is_none());
     }
 }

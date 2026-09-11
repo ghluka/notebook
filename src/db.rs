@@ -442,8 +442,11 @@ const SEARCH_SQL: &str = "
     ORDER BY score
     LIMIT ?3";
 
-/// Free-text search over chunk renditions. Tries all-terms first, then any-term,
-/// so a long natural-language question still returns something.
+/// Free-text search over chunk renditions. All-terms matches come first, then
+/// any-term matches fill up to the limit. Requiring every term in one chunk
+/// fails exactly when the terms live in different files: "second" in some
+/// proof and "reading" in the readings index, so the index never surfaces and
+/// the model declares the file absent after one search.
 pub async fn search_chunks(
     db: &Db,
     query: &str,
@@ -455,19 +458,30 @@ pub async fn search_chunks(
         return Ok(Vec::new());
     }
 
-    for joiner in [" AND ", " OR "] {
+    let mut hits: Vec<SearchHit> = Vec::new();
+    // One term is one query; running it twice only wastes time.
+    let joiners: &[&str] = if terms.len() == 1 { &[" OR "] } else { &[" AND ", " OR "] };
+    for joiner in joiners {
         let expr = terms.join(joiner);
-        let hits = sqlx::query_as::<_, SearchHit>(SEARCH_SQL)
+        let batch = sqlx::query_as::<_, SearchHit>(SEARCH_SQL)
             .bind(&expr)
             .bind(source_id)
             .bind(limit)
             .fetch_all(db)
             .await?;
-        if !hits.is_empty() {
-            return Ok(hits);
+        for hit in batch {
+            if hits.len() >= limit as usize {
+                break;
+            }
+            if !hits.iter().any(|h: &SearchHit| h.chunk_id == hit.chunk_id) {
+                hits.push(hit);
+            }
+        }
+        if hits.len() >= limit as usize {
+            break;
         }
     }
-    Ok(Vec::new())
+    Ok(hits)
 }
 
 pub async fn chunks_for_source(db: &Db, source_id: &str) -> sqlx::Result<Vec<SearchHit>> {
@@ -640,6 +654,88 @@ mod query_tests {
     fn quotes_everything_so_operators_cannot_leak() {
         let terms = fts_terms("NOT (a OR b) AND \"c\"");
         assert!(terms.iter().all(|t| t.starts_with('"') && t.ends_with('"')));
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    async fn scratch() -> Db {
+        let db = connect("sqlite::memory:").await.expect("in memory db");
+        sqlx::query("INSERT INTO users (id, name, created_at) VALUES ('u', 'test', ?1)")
+            .bind(now())
+            .execute(&db)
+            .await
+            .expect("user");
+        db
+    }
+
+    async fn add_source(db: &Db, title: &str, chunks: &[&str]) -> String {
+        let source = insert_source(
+            db,
+            NewSource {
+                owner_id: "u".into(),
+                folder_id: None,
+                title: title.into(),
+                original_filename: Some(title.into()),
+                kind: "text".into(),
+                media_type: "text/markdown".into(),
+                byte_size: 100,
+                sha256: format!("sha-{title}"),
+                storage_path: format!("ab/sha-{title}"),
+            },
+        )
+        .await
+        .expect("source");
+        replace_document(
+            db,
+            &source.id,
+            &chunks.join("\n\n"),
+            None,
+            None,
+            &chunks
+                .iter()
+                .enumerate()
+                .map(|(i, c)| NewChunk {
+                    heading: None,
+                    locator: Some(format!("line {}", i + 1)),
+                    content: c.to_string(),
+                })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("document");
+        source.id
+    }
+
+    /// The "second reading" failure: one term lives in a proof, the other in
+    /// the readings index. All-terms alone returns only the proof; the merged
+    /// search must also surface the index behind it.
+    #[tokio::test]
+    async fn any_term_hits_fill_in_behind_all_term_hits() {
+        let db = scratch().await;
+        add_source(&db, "readings.md", &["Here is the weekly reading list.", "Week 02 is Sets and Propositions."])
+            .await;
+        add_source(&db, "notes.pdf", &["Check the second item on the list."]).await;
+        add_source(&db, "both.pdf", &["The second reading group meets Friday."]).await;
+
+        let hits = search_chunks(&db, "second reading", None, 10).await.expect("search");
+        let titles: Vec<&str> = hits.iter().map(|h| h.source_title.as_str()).collect();
+
+        assert_eq!(titles[0], "both.pdf", "the chunk with every term still ranks first");
+        assert!(titles.contains(&"readings.md"), "the index is present: {titles:?}");
+        assert!(titles.contains(&"notes.pdf"), "the single-term file is present: {titles:?}");
+    }
+
+    #[tokio::test]
+    async fn single_term_queries_run_once() {
+        let db = scratch().await;
+        add_source(&db, "a.md", &["Something about induction."]).await;
+
+        let hits = search_chunks(&db, "induction", None, 10).await.expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_title, "a.md");
     }
 }
 
