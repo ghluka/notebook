@@ -91,9 +91,9 @@ pub async fn rewind(
     Json(body): Json<RewindBody>,
 ) -> AppResult<Json<Value>> {
     let conversation = load(&state, &id).await?;
-    let rewound = db::rewind_to_question(&state.db, &conversation.id, &body.message_id).await?;
+    let rewound = db::rewind_question(&state.db, &conversation.id, &body.message_id).await?;
 
-    let Some((message, removed)) = rewound else {
+    let Some((question, removed)) = rewound else {
         return Err(AppError::BadRequest(
             "there is no question at or before that message to take back".into(),
         ));
@@ -101,7 +101,13 @@ pub async fn rewind(
 
     Ok(Json(json!({
         "conversation_id": id,
-        "message": message,
+        "message": question.content,
+        // The files it was asked about, so asking it again asks about them.
+        "attachments": question
+            .attachments
+            .as_deref()
+            .and_then(|a| serde_json::from_str::<Value>(a).ok())
+            .unwrap_or_else(|| json!([])),
         "removed": removed,
     })))
 }

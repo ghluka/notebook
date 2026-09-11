@@ -139,6 +139,12 @@
   .turn.user .bubble { background:var(--raised); border-radius:14px; padding:9px 15px;
                        max-width:78%; white-space:pre-wrap; }
   .turn.user .msg-actions { margin-top:3px; font-size:12px; }
+  /* The files a question was asked about, under it: a record of what it
+     searched, and a way to open them. */
+  .sent-files { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px;
+                margin-top:6px; max-width:78%; }
+  .attach.sent { padding:6px 10px; cursor:pointer; }
+  .attach.sent:hover { border-color:var(--accent); color:var(--fg); }
   /* Editing a question in place: the composer, where the question already is. */
   .turn.user .editor { width:100%; background:var(--raised); border:1px solid var(--line);
                        border-radius:14px; padding:11px 14px 9px; }
@@ -256,7 +262,7 @@
   .send.stop:hover { border-color:var(--accent); }
   .send .sq { width:9px; height:9px; background:currentColor; border-radius:2px; }
 
-  /* Attachments: the files this conversation is asking about. */
+  /* Attachments: the files the next question will ask about. */
   .attachments { display:flex; flex-wrap:wrap; align-items:center; gap:6px;
                  margin-bottom:8px; }
   .attachments[hidden] { display:none; }
@@ -701,7 +707,7 @@ function iconSvg(kind, filename) {
   else if (kind === 'audio') shape = ICON.audio;
   else if (kind === 'text' && /\.(rs|py|js|ts|go|c|h|cpp|java|json|toml|ya?ml)$/i.test(filename || ''))
     { shape = ICON.code; color = '#a8b57a'; }
-  const label = kind === 'pdf' ? '<text x="8" y="12.4" font-size="4.6" fill="' + color +
+  const label = kind === 'pdf' ? '<text x="3" y="12.4" font-size="4.6" fill="' + color +
       '" stroke="none" font-family="sans-serif" font-weight="700">PDF</text>' : '';
   return '<svg class="ico" viewBox="0 0 16 16" fill="none" stroke="' + color +
          '" stroke-width="1.3" stroke-linejoin="round">' + shape + label + '</svg>';
@@ -2157,9 +2163,9 @@ function tableCells(row) {
 }
 
 /* --------------------------------------------------- attachments */
-/* Files the conversation is about. Dragged in from the explorer, they stay
-   until removed, so a line of questioning keeps its focus without the explorer
-   having to double as a scope control. */
+/* Files the next question is about. Dragged in from the explorer, they sit
+   above the composer until the question is sent, then go with it: they show
+   under the question, and the composer is clear for the next one. */
 
 function attachSources(ids) {
   const added = ids.filter(id => !state.attached.includes(id) &&
@@ -2193,7 +2199,7 @@ function renderAttachments() {
                      `<span>${esc(source.title)}</span>`;
     const drop = document.createElement('button');
     drop.textContent = '\u00d7';
-    drop.title = 'Remove from this conversation';
+    drop.title = 'Remove';
     drop.onclick = () => detachSource(id);
     chip.append(drop);
     box.append(chip);
@@ -2252,7 +2258,36 @@ function emptyState() {
 }
 function clearEmpty() { document.getElementById('emptyChat')?.remove(); }
 
-function userTurn(text, messageId) {
+/* A question's files as the thread shows them. Live they are source ids; from
+   storage they are {id, title, kind}, as they were when it was asked. The chip
+   looks the file up when clicked rather than when drawn, since a reopened
+   conversation can be drawn before the file list has loaded. */
+function sentFiles(files) {
+  const row = document.createElement('div');
+  row.className = 'sent-files';
+  for (const f of files) {
+    const id = typeof f === 'string' ? f : f.id;
+    const known = state.sources.find(s => s.id === id);
+    const title = known?.title || f.title || 'a removed file';
+    const chip = document.createElement('div');
+    chip.className = 'attach sent';
+    chip.title = 'Asked about ' + title + '. Click to open it.';
+    chip.innerHTML = iconSvg(known?.kind || f.kind || 'text', title) +
+                     '<span>' + esc(title) + '</span>';
+    chip.onclick = () => {
+      const source = state.sources.find(s => s.id === id);
+      if (source) openViewer(source);
+      else note(title + ' has since been removed from the notebook.');
+    };
+    row.append(chip);
+  }
+  return row;
+}
+
+/* The ids to ask with again, from either form. */
+const fileIds = files => (files || []).map(f => typeof f === 'string' ? f : f.id);
+
+function userTurn(text, messageId, files = []) {
   clearEmpty();
   const el = document.createElement('div');
   el.className = 'turn user';
@@ -2260,7 +2295,8 @@ function userTurn(text, messageId) {
   bubble.className = 'bubble';
   bubble.textContent = text;
   el.append(bubble);
-  if (messageId) attachUserActions(el, { message_id: messageId, text });
+  if (files.length) el.append(sentFiles(files));
+  if (messageId) attachUserActions(el, { message_id: messageId, text, files });
   $('#thread').append(el);
   el.scrollIntoView({ block: 'end' });
   return el;
@@ -2606,7 +2642,7 @@ function editTurn(el, message) {
     if (!text) return area.focus();
     if (text === message.text) return close();
     if (!await unask(el, message, 'Send the edit?')) return area.focus();
-    runTurn(text);
+    runTurn(text, fileIds(message.files));
   };
 
   grow();
@@ -2622,6 +2658,8 @@ async function undoTurn(el, message) {
     q.value = message.text;
     q.dispatchEvent(new Event('input'));
     q.focus();
+    // And its files back above the composer, the way they were before sending.
+    attachSources(fileIds(message.files));
   }
 }
 
@@ -2703,7 +2741,7 @@ async function retryTurn(el, messageId) {
   // and anything after it comes off first.
   removeFrom(priorQuestion(el) || el);
   loadChats();
-  runTurn(res.message);
+  runTurn(res.message, fileIds(res.attachments));
 }
 
 function finishTurn(el, res) {
@@ -2816,8 +2854,14 @@ function submitInput(steerNow) {
   if (!text) return;
   q.value = ''; q.style.height = 'auto';
 
-  if (!composer.busy) return runTurn(text);
-  composer.queue.unshift({ text });
+  // The attached files go with this question, queued or not, and the composer
+  // is clear for the next one.
+  const files = [...state.attached];
+  state.attached = [];
+  renderAttachments();
+
+  if (!composer.busy) return runTurn(text, files);
+  composer.queue.unshift({ text, files });
   renderQueue();
   if (steerNow) stopTurn();
 }
@@ -2838,7 +2882,8 @@ function renderQueue() {
     chip.className = 'qchip';
     const text = document.createElement('span');
     text.className = 'qtext';
-    text.textContent = item.text;
+    const count = item.files?.length || 0;
+    text.textContent = item.text + (count ? '  · ' + count + (count === 1 ? ' file' : ' files') : '');
     const steer = document.createElement('button');
     steer.className = 'steer';
     steer.textContent = 'Ask now';
@@ -2870,11 +2915,11 @@ function stopTurn() {
 function drainQueue() {
   const next = composer.queue.shift();
   renderQueue();
-  if (next) runTurn(next.text);
+  if (next) runTurn(next.text, next.files || []);
 }
 
-async function runTurn(text) {
-  const asked = userTurn(text);
+async function runTurn(text, files = []) {
+  const asked = userTurn(text, null, files);
   const turn = assistantTurn();
   const controller = new AbortController();
   composer.controller = controller;
@@ -2922,7 +2967,7 @@ async function runTurn(text) {
       if (composer.busy) return note('Wait for the current answer to finish first.');
       el.remove();
       asked.remove();
-      runTurn(text);
+      runTurn(text, files);
     });
   };
 
@@ -2933,7 +2978,7 @@ async function runTurn(text) {
       body: JSON.stringify({
         message: text,
         conversation_id: state.conversationId,
-        source_ids: [...state.attached],
+        source_ids: files,
         model_id: state.activeModel?.id || null,
       }),
       signal: controller.signal,
@@ -3011,7 +3056,7 @@ async function runTurn(text) {
           state.context = { used: msg.context_used, window: msg.context_window };
           renderContext();
           turn.classList.remove('live');
-          attachUserActions(asked, { message_id: msg.user_message_id, text });
+          attachUserActions(asked, { message_id: msg.user_message_id, text, files });
           closeThought();
           // finishTurn redraws the trace from what the server stored, so the
           // finished turn reads exactly as it will when reopened.
@@ -3198,7 +3243,8 @@ async function openConversation(id, { fromHistory = false } = {}) {
       dividerDrawn = true;
     }
     if (m.role === 'user') {
-      userTurn(m.content, m.compacted ? null : m.id);
+      userTurn(m.content, m.compacted ? null : m.id,
+               m.attachments ? JSON.parse(m.attachments) : []);
     } else if (m.role === 'assistant') {
       const el = assistantTurn();
       stopTimer(el);

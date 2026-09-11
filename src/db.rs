@@ -899,6 +899,9 @@ pub struct StoredMessage {
     /// The steps the turn took before this answer, as JSON: stretches of
     /// reasoning and tool calls, in order. See `routes::chat::TraceStep`.
     pub trace: Option<String>,
+    /// The files a question was asked about, as JSON: id, title and kind,
+    /// kept as they were when it was asked.
+    pub attachments: Option<String>,
     pub created_at: String,
 }
 
@@ -970,6 +973,16 @@ pub async fn set_message_trace(db: &Db, id: &str, trace: &str) -> sqlx::Result<(
     Ok(())
 }
 
+/// The files a question was asked about, kept with it.
+pub async fn set_message_attachments(db: &Db, id: &str, files: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE messages SET attachments = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(files)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Everything ever said, for display.
 pub async fn conversation_messages(db: &Db, id: &str) -> sqlx::Result<Vec<StoredMessage>> {
     sqlx::query_as::<_, StoredMessage>(
@@ -985,11 +998,22 @@ pub async fn conversation_messages(db: &Db, id: &str) -> sqlx::Result<Vec<Stored
 /// to do with it. Point at an answer and the question behind it is the one that
 /// goes; point at a question and it is that one. Returns None when the message
 /// is not there, or when nothing at or before it was a question.
+#[cfg(test)]
 pub async fn rewind_to_question(
     db: &Db,
     conversation_id: &str,
     message_id: &str,
 ) -> sqlx::Result<Option<(String, usize)>> {
+    Ok(rewind_question(db, conversation_id, message_id).await?.map(|(m, n)| (m.content, n)))
+}
+
+/// Unasking a question, handing back the whole of it: its text and the files
+/// it was asked about, so asking it again asks it about the same files.
+pub async fn rewind_question(
+    db: &Db,
+    conversation_id: &str,
+    message_id: &str,
+) -> sqlx::Result<Option<(StoredMessage, usize)>> {
     let messages = conversation_messages(db, conversation_id).await?;
     let Some(at) = messages.iter().position(|m| m.id == message_id) else {
         return Ok(None);
@@ -1008,7 +1032,7 @@ pub async fn rewind_to_question(
         .execute(db)
         .await?;
 
-    Ok(Some((messages[question].content.clone(), doomed.len())))
+    Ok(Some((messages[question].clone(), doomed.len())))
 }
 
 /// What the next prompt should carry: only what has not been compacted away.
@@ -1040,6 +1064,22 @@ mod rewind_tests {
 
     async fn say(db: &Db, id: &str, role: &str, text: &str) -> String {
         append_message(db, id, role, text, None, None, None).await.expect("message")
+    }
+
+    /// A retried or edited question asks about the same files it did before.
+    #[tokio::test]
+    async fn a_rewound_question_keeps_its_files() {
+        let (db, c) = scratch().await;
+        let asked = say(&db, &c, "user", "what is a set?").await;
+        say(&db, &c, "assistant", "a collection").await;
+        let files = r#"[{"id":"s1","title":"symbols.md","kind":"text"}]"#;
+        set_message_attachments(&db, &asked, files).await.expect("files");
+
+        let (question, removed) =
+            rewind_question(&db, &c, &asked).await.expect("query").expect("rewound");
+        assert_eq!(question.content, "what is a set?");
+        assert_eq!(question.attachments.as_deref(), Some(files));
+        assert_eq!(removed, 2);
     }
 
     #[tokio::test]

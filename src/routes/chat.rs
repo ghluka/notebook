@@ -577,6 +577,8 @@ struct PreparedTurn {
     seen: Vec<SearchHit>,
     messages: Vec<Message>,
     tools: Vec<Tool>,
+    /// The files this question was asked about, stored with it.
+    attached: Vec<String>,
 }
 
 async fn prepare_turn(
@@ -650,7 +652,7 @@ async fn prepare_turn(
         String::new()
     } else {
         format!(
-            "The user has attached {} file(s) to this conversation; searches are \
+            "The user attached {} file(s) to this question, and searches are \
              limited to them.\n\n",
             body.source_ids.len()
         )
@@ -682,7 +684,16 @@ async fn prepare_turn(
         if resolved.model.supports_tools { researcher_tools(&body.source_ids) } else { vec![] };
 
     Ok((
-        PreparedTurn { existing, resolved, effort, budget_chars, seen, messages, tools },
+        PreparedTurn {
+            existing,
+            resolved,
+            effort,
+            budget_chars,
+            seen,
+            messages,
+            tools,
+            attached: body.source_ids.clone(),
+        },
         client,
     ))
 }
@@ -1035,6 +1046,19 @@ async fn finish_turn(
 
     let user_message_id =
         db::append_message(&state.db, &conversation_id, "user", message, None, None, None).await?;
+    // The files the question was asked about, kept with it: shown under it,
+    // and asked about again by a retry or an edit. Titles are kept as they are
+    // now, so a file deleted later still has a name.
+    if !prep.attached.is_empty() {
+        let mut files = Vec::new();
+        for id in &prep.attached {
+            if let Some(s) = db::get_source(&state.db, id).await? {
+                files.push(json!({ "id": s.id, "title": s.title, "kind": s.kind }));
+            }
+        }
+        db::set_message_attachments(&state.db, &user_message_id, &json!(files).to_string())
+            .await?;
+    }
     let message_id = db::append_message(
         &state.db,
         &conversation_id,
@@ -1470,6 +1494,7 @@ mod tests {
             thinking: None,
             thinking_ms: None,
             trace: None,
+            attachments: None,
             created_at: String::new(),
         }
     }
