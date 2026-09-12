@@ -631,14 +631,14 @@
       <div class="field"><label for="pfName">Name</label><input type="text" id="pfName"></div>
       <div class="field"><label for="pfStyle">API style</label>
         <select id="pfStyle">
-          <option value="anthropic">Anthropic, /v1/messages</option>
-          <option value="openai">OpenAI compatible, /chat/completions</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI compatible</option>
         </select>
       </div>
       <div class="field"><label for="pfUrl">Base URL</label>
         <input type="text" id="pfUrl" placeholder="https://api.example.com/v1"></div>
       <div class="field"><label for="pfKey">API key</label>
-        <input type="password" id="pfKey" placeholder="stored server side, never returned"></div>
+        <input type="password" id="pfKey" placeholder="stored server side"></div>
       <div class="hint" id="pfHint">Saving reads the endpoint's model list and imports it.</div>
       <div style="display:flex; gap:8px; margin-top:16px; justify-content:flex-end">
         <button class="btn" id="pfSave">Save</button>
@@ -2038,6 +2038,10 @@ function markdown(src) {
   text = text.replace(/[  ]/g, ' ');
 
   const renderMath = (tex, display) => {
+    // Nothing left to lay out, typically a citation the model wrapped in maths,
+    // `\[ [notes.pdf, line 3] \]`, whose mark is already gone: draw nothing
+    // rather than an empty source box.
+    if (!tex.trim()) return '';
     const mathml = texToMathml(tex.trim(), display);
     if (mathml) return display ? '<div class="math-block">' + mathml + '</div>' : mathml;
     // Outside the subset: show the source rather than a wrong formula.
@@ -2425,9 +2429,13 @@ function note(text, bad, retry) {
    no-break space inside. Those are the same marks and come out the same way. */
 const OPEN_MARK = '[\\[\\u3010\\u3014\\u3016\\uFF3B]';
 const CLOSE_MARK = '[\\]\\u3011\\u3015\\u3017\\uFF3D]';
-const NOT_CLOSE = '[^\\]\\u3011\\u3015\\u3017\\uFF3D\\n]';
+// Neither kind of bracket may sit inside a mark. With only the closing ones
+// here, `\[ [notes.pdf, line 3] \]` matched from the maths' own bracket and took
+// it along with the citation, leaving `\ \]` behind as text.
+const NOT_CLOSE = '[^\\[\\]\\u3010\\u3011\\u3014\\u3015\\u3016\\u3017\\uFF3B\\uFF3D\\n]';
 const CITED_FILE = new RegExp(
-  '\\s*' + OPEN_MARK + NOT_CLOSE +
+  // A bracket straight after a backslash opens maths, never a citation.
+  '\\s*(?<!\\\\)' + OPEN_MARK + NOT_CLOSE +
   '*\\.(?:pdf|md|markdown|txt|csv|json|docx?|pptx?|png|jpe?g|webp|gif|mp[34]|wav|mov)' +
   NOT_CLOSE + '*' + CLOSE_MARK + '(?!\\()', 'gi');
 
@@ -2438,6 +2446,12 @@ const CITED_FILE = new RegExp(
 const LOCATOR_MARK = new RegExp(
   '\\s*' + OPEN_MARK + '\\s*(?:lines?|ll?\\.|pp?\\.|pages?)\\s*\\d+' +
   '(?:\\s*[-,\\u2010-\\u2015\\u2212]\\s*\\d+)*\\s*' + CLOSE_MARK + '(?!\\()', 'gi');
+
+/* A line that is only a note of where something came from, "[Source:
+   definition of subset]". The chips under the answer say which files it drew
+   on, so the note is noise in the prose, the same as a citation mark. */
+const SOURCE_NOTE =
+  /^[ \t]*[\[【［]\s*sources?\s*:[^\]】］\n]*[\]】］][ \t]*$/gim;
 
 const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -2455,7 +2469,7 @@ function stripCitations(text, citations = []) {
     // Labels first, so nothing depends on the shape of a file name.
     out = out.replace(labelMark(c.label), '');
   }
-  return out.replace(CITED_FILE, '').replace(LOCATOR_MARK, '').replace(/[ \t  ]+([.,;:])/g, '$1');
+  return out.replace(CITED_FILE, '').replace(LOCATOR_MARK, '').replace(SOURCE_NOTE, '').replace(/[ \t  ]+([.,;:])/g, '$1');
 }
 
 const ACTION_ICON = {
