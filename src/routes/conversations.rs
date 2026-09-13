@@ -18,8 +18,10 @@ and anything still open. Keep every fact and citation that a later answer might 
 need, drop the phrasing and the pleasantries. Write it as notes for yourself, \
 not as a reply to anyone.";
 
+/// The open vault's conversations only.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
-    let conversations = db::list_conversations(&state.db, &state.user_id).await?;
+    let vault = db::active_vault(&state.db, &state.user_id).await?;
+    let conversations = db::list_conversations(&state.db, &state.user_id, &vault.id).await?;
     Ok(Json(json!({ "conversations": conversations })))
 }
 

@@ -90,9 +90,10 @@ src/
     mod.rs             router assembly
     health.rs
     sources.rs         upload, organise, inspect, search; folders live here
+    vaults.rs          list, create, rename, delete and open vaults
     chat.rs            researcher endpoint
     models.rs          providers, models, settings, the Configure panel
-static/index.html      the whole UI: explorer, chat, viewer, Configure panel
+static/index.html      the whole UI: explorer, chat, viewer, Configure and Settings, vaults
 ```
 
 ## 4. Model configuration
@@ -105,7 +106,7 @@ roles: `researcher_model` and `analyzer_model`.
 
 ```
 users ──< providers ──< models
-   └──< settings (researcher_model, analyzer_model, thinking_effort)
+   └──< settings (researcher_model, analyzer_model, thinking_effort, vault)
 ```
 
 Rules that matter:
@@ -258,6 +259,28 @@ Three panes, in the NotebookLM arrangement: explorer, conversation, viewer.
 - **Rail** is two equal halves, chats over sources, each scrolling on its own so
   neither can squeeze the other no matter how many rows it holds. Both carry the
   same section header: uppercase, faint, with its actions on the right.
+- **Vaults** are separate libraries, the way Obsidian has them. A vault owns
+  its sources, folders and conversations (`vaults`, migration 0012, which puts
+  everything that existed into one vault called Library). One is open at a
+  time, the `vault` setting, read through `db::active_vault`, which falls back
+  to the oldest vault when the setting points at a deleted one and makes one
+  when there are none, so an upload always has somewhere to land. Every list
+  and every search reads the open vault. A conversation keeps the vault it was
+  started in: its search, catalogue and tools read that vault whichever one is
+  open, and opening it from a link or the back button opens its vault too. The
+  switcher sits at the foot of the rail under the status line, with the
+  settings gear to its right; its menu lists the vaults and opens the manager,
+  which creates, renames and deletes them. Move to vault, on a file (or the
+  selection) or on a folder (with its subfolders and files), is how an existing
+  library gets sorted; either lands at the target's root. Deleting a vault
+  deletes what is in it, and a stored file goes only when no source in any
+  vault still uses its bytes. The last vault cannot be deleted. Nothing
+  selected, attached or open in the viewer survives a switch, and each vault
+  remembers its own last conversation in `localStorage`.
+- **Settings** (the gear) sets the researcher, the analyzer and the thinking
+  effort, and links to Configure for providers and the full model table. The
+  analyzer is offered only models tagged vision, plus whichever holds the role
+  now, so the select never names a model that is not the one in use.
 - **Chats** live in the top half of the rail: every conversation this user has
   had, newest first, with a dot on the compacted ones. Each row has a delete
   button on hover and a right click menu (open, rename, compact, delete).

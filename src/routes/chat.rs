@@ -234,16 +234,19 @@ fn researcher_tools(attached: &[String]) -> Vec<Tool> {
 /// Search, expanded: whole chunks, with their neighbours, ordered as they read.
 async fn search_expanded(
     state: &AppState,
+    vault: &str,
     query: &str,
     attached: &[String],
     limit: i64,
 ) -> AppResult<Vec<SearchHit>> {
     let mut hits = Vec::new();
     if attached.is_empty() {
-        hits = db::search_chunks(&state.db, query, None, limit).await?;
+        hits = db::search_chunks(&state.db, vault, query, None, limit).await?;
     } else {
         for source_id in attached {
-            hits.extend(db::search_chunks(&state.db, query, Some(source_id), limit).await?);
+            hits.extend(
+                db::search_chunks(&state.db, vault, query, Some(source_id), limit).await?,
+            );
         }
         hits.sort_by(|a, b| a.score.total_cmp(&b.score));
         hits.truncate(limit as usize);
@@ -475,9 +478,11 @@ fn match_source_by_title<'a>(
 }
 
 /// Run one tool call and describe the result the way an excerpt is described,
-/// so anything the model reads can be cited the same way.
+/// so anything the model reads can be cited the same way. Every tool sees the
+/// conversation's vault and nothing else.
 async fn run_tool(
     state: &AppState,
+    vault: &str,
     call: &crate::llm::ToolCall,
     attached: &[String],
     seen: &mut Vec<SearchHit>,
@@ -490,7 +495,7 @@ async fn run_tool(
             if query.trim().is_empty() {
                 return Ok("No query given.".into());
             }
-            let hits = search_expanded(state, query, attached, HITS_PER_SEARCH).await?;
+            let hits = search_expanded(state, vault, query, attached, HITS_PER_SEARCH).await?;
             for hit in &hits {
                 if !seen.iter().any(|s| s.chunk_id == hit.chunk_id) {
                     seen.push(hit.clone());
@@ -508,7 +513,7 @@ async fn run_tool(
             let lines = call.arguments["lines"].as_u64().unwrap_or(READ_DEFAULT_LINES as u64)
                 as usize;
 
-            let briefs = db::source_briefs(&state.db, &state.user_id).await?;
+            let briefs = db::source_briefs(&state.db, vault).await?;
             let found = match_source_by_title(&briefs, title);
             let Some(brief) = found else {
                 return Ok(format!(
@@ -544,7 +549,7 @@ async fn run_tool(
             ))
         }
         "list_sources" => {
-            let briefs = db::source_briefs(&state.db, &state.user_id).await?;
+            let briefs = db::source_briefs(&state.db, vault).await?;
             if briefs.is_empty() {
                 return Ok("The notebook is empty.".into());
             }
@@ -571,6 +576,8 @@ async fn run_tool(
 /// HTTP error in both.
 struct PreparedTurn {
     existing: Option<db::Conversation>,
+    /// The conversation's vault, or the open one for a new conversation.
+    vault: String,
     resolved: models::Resolved,
     effort: Effort,
     budget_chars: usize,
@@ -594,6 +601,12 @@ async fn prepare_turn(
                 .ok_or_else(|| AppError::NotFound(format!("conversation {id}")))?,
         ),
         None => None,
+    };
+    // A conversation keeps searching the vault it was started in, whichever
+    // one happens to be open now.
+    let vault = match existing.as_ref().and_then(|c| c.vault_id.clone()) {
+        Some(vault) => vault,
+        None => db::active_vault(&state.db, &state.user_id).await?.id,
     };
 
     let resolved = match &body.model_id {
@@ -627,7 +640,7 @@ async fn prepare_turn(
 
     let limit = body.max_hits.unwrap_or(HITS_PER_SEARCH).clamp(1, 30);
     let query = retrieval_query(&body.message, &history);
-    let seen = search_expanded(state, &query, &body.source_ids, limit).await?;
+    let seen = search_expanded(state, &vault, &query, &body.source_ids, limit).await?;
 
     // A compaction summary stands in for the turns it replaced, then whatever
     // has been said since, then the excerpts, then the question.
@@ -660,7 +673,7 @@ async fn prepare_turn(
     // The model cannot read what it does not know exists. A keyword search
     // never lists the files, so the catalogue goes in up front: titles are
     // what `read_source` takes.
-    let catalogue = render_catalogue(&db::source_briefs(&state.db, &state.user_id).await?);
+    let catalogue = render_catalogue(&db::source_briefs(&state.db, &vault).await?);
     messages.push(Message::user(format!(
         "{attachment_note}{catalogue}\n\nA keyword search on this message found \
          these passages. Search again or read a source if they are not \
@@ -686,6 +699,7 @@ async fn prepare_turn(
     Ok((
         PreparedTurn {
             existing,
+            vault,
             resolved,
             effort,
             budget_chars,
@@ -1040,7 +1054,7 @@ async fn finish_turn(
         Some(c) => c.id.clone(),
         None => {
             let title: String = message.chars().take(60).collect();
-            db::create_conversation(&state.db, &state.user_id, &title).await?.id
+            db::create_conversation(&state.db, &state.user_id, &prep.vault, &title).await?.id
         }
     };
 
@@ -1161,6 +1175,7 @@ pub async fn chat(
             tool_log.push(tool_log_line(call));
             let output = run_tool(
                 &state,
+                &prep.vault,
                 call,
                 &body.source_ids,
                 &mut prep.seen,
@@ -1299,6 +1314,7 @@ async fn run_stream_turn(
             emit_json(&tx, "tool", json!({ "t": line }));
             let output = match run_tool(
                 &state,
+                &prep.vault,
                 call,
                 &body.source_ids,
                 &mut prep.seen,

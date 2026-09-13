@@ -34,6 +34,7 @@ pub fn new_id() -> String {
 pub struct Source {
     pub id: String,
     pub owner_id: String,
+    pub vault_id: Option<String>,
     pub folder_id: Option<String>,
     pub title: String,
     pub original_filename: Option<String>,
@@ -59,6 +60,7 @@ pub struct Source {
 #[derive(Debug, Clone)]
 pub struct NewSource {
     pub owner_id: String,
+    pub vault_id: String,
     pub folder_id: Option<String>,
     pub title: String,
     pub original_filename: Option<String>,
@@ -73,10 +75,10 @@ pub async fn insert_source(db: &Db, s: NewSource) -> sqlx::Result<Source> {
     let id = new_id();
     let ts = now();
     sqlx::query(
-        "INSERT INTO sources (id, owner_id, folder_id, title, original_filename, kind,
-                              media_type, byte_size, sha256, storage_path, status,
+        "INSERT INTO sources (id, owner_id, vault_id, folder_id, title, original_filename,
+                              kind, media_type, byte_size, sha256, storage_path, status,
                               metadata, created_at, updated_at)
-         VALUES (?1, ?10, ?11, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', '{}', ?9, ?9)",
+         VALUES (?1, ?10, ?12, ?11, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', '{}', ?9, ?9)",
     )
     .bind(&id)
     .bind(&s.title)
@@ -89,6 +91,7 @@ pub async fn insert_source(db: &Db, s: NewSource) -> sqlx::Result<Source> {
     .bind(&ts)
     .bind(&s.owner_id)
     .bind(&s.folder_id)
+    .bind(&s.vault_id)
     .execute(db)
     .await?;
 
@@ -102,11 +105,11 @@ pub async fn get_source(db: &Db, id: &str) -> sqlx::Result<Option<Source>> {
         .await
 }
 
-pub async fn list_sources(db: &Db, owner: &str) -> sqlx::Result<Vec<Source>> {
+pub async fn list_sources(db: &Db, vault: &str) -> sqlx::Result<Vec<Source>> {
     sqlx::query_as::<_, Source>(
-        "SELECT * FROM sources WHERE owner_id = ?1 ORDER BY title COLLATE NOCASE",
+        "SELECT * FROM sources WHERE vault_id = ?1 ORDER BY title COLLATE NOCASE",
     )
-    .bind(owner)
+    .bind(vault)
     .fetch_all(db)
     .await
 }
@@ -144,16 +147,17 @@ pub async fn update_source(
 pub struct Folder {
     pub id: String,
     pub owner_id: String,
+    pub vault_id: Option<String>,
     pub parent_id: Option<String>,
     pub name: String,
     pub created_at: String,
 }
 
-pub async fn list_folders(db: &Db, owner: &str) -> sqlx::Result<Vec<Folder>> {
+pub async fn list_folders(db: &Db, vault: &str) -> sqlx::Result<Vec<Folder>> {
     sqlx::query_as::<_, Folder>(
-        "SELECT * FROM folders WHERE owner_id = ?1 ORDER BY name COLLATE NOCASE",
+        "SELECT * FROM folders WHERE vault_id = ?1 ORDER BY name COLLATE NOCASE",
     )
-    .bind(owner)
+    .bind(vault)
     .fetch_all(db)
     .await
 }
@@ -161,19 +165,21 @@ pub async fn list_folders(db: &Db, owner: &str) -> sqlx::Result<Vec<Folder>> {
 pub async fn create_folder(
     db: &Db,
     owner: &str,
+    vault: &str,
     name: &str,
     parent_id: Option<&str>,
 ) -> sqlx::Result<Folder> {
     let id = new_id();
     sqlx::query(
-        "INSERT INTO folders (id, owner_id, parent_id, name, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO folders (id, owner_id, vault_id, parent_id, name, created_at)
+         VALUES (?1, ?2, ?6, ?3, ?4, ?5)",
     )
     .bind(&id)
     .bind(owner)
     .bind(parent_id)
     .bind(name)
     .bind(now())
+    .bind(vault)
     .execute(db)
     .await?;
 
@@ -217,6 +223,179 @@ pub async fn delete_folder(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
         .execute(db)
         .await?;
     Ok(())
+}
+
+// ----------------------------------------------------------------- vaults
+
+/// A separate library: its own sources, folders and conversations. One is
+/// open at a time, and that is the one every list and every search sees.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Vault {
+    pub id: String,
+    pub owner_id: String,
+    pub name: String,
+    pub created_at: String,
+}
+
+/// A vault as the switcher lists it, with what it holds.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct VaultSummary {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub source_count: i64,
+    pub conversation_count: i64,
+}
+
+/// The setting that says which vault is open.
+const ACTIVE_VAULT: &str = "vault";
+
+pub async fn list_vaults(db: &Db, owner: &str) -> sqlx::Result<Vec<VaultSummary>> {
+    sqlx::query_as::<_, VaultSummary>(
+        "SELECT v.id, v.name, v.created_at,
+                (SELECT count(*) FROM sources s WHERE s.vault_id = v.id) AS source_count,
+                (SELECT count(*) FROM conversations c
+                  WHERE c.vault_id = v.id
+                    AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id))
+                    AS conversation_count
+           FROM vaults v
+          WHERE v.owner_id = ?1
+          ORDER BY v.name COLLATE NOCASE",
+    )
+    .bind(owner)
+    .fetch_all(db)
+    .await
+}
+
+pub async fn get_vault(db: &Db, owner: &str, id: &str) -> sqlx::Result<Option<Vault>> {
+    sqlx::query_as::<_, Vault>("SELECT * FROM vaults WHERE id = ?1 AND owner_id = ?2")
+        .bind(id)
+        .bind(owner)
+        .fetch_optional(db)
+        .await
+}
+
+pub async fn create_vault(db: &Db, owner: &str, name: &str) -> sqlx::Result<Vault> {
+    let id = new_id();
+    sqlx::query("INSERT INTO vaults (id, owner_id, name, created_at) VALUES (?1, ?2, ?3, ?4)")
+        .bind(&id)
+        .bind(owner)
+        .bind(name)
+        .bind(now())
+        .execute(db)
+        .await?;
+    get_vault(db, owner, &id).await?.ok_or(sqlx::Error::RowNotFound)
+}
+
+pub async fn rename_vault(db: &Db, owner: &str, id: &str, name: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE vaults SET name = ?3 WHERE id = ?1 AND owner_id = ?2")
+        .bind(id)
+        .bind(owner)
+        .bind(name)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// Everything in the vault goes with it: sources and their renditions,
+/// folders, conversations. The caller deals with the files on disk.
+pub async fn delete_vault(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
+    sqlx::query("DELETE FROM vaults WHERE id = ?1 AND owner_id = ?2")
+        .bind(id)
+        .bind(owner)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+/// The vault that is open. A setting that points at a deleted vault falls back
+/// to the oldest one, and a user with none gets one, so there is always
+/// somewhere for a file to land.
+pub async fn active_vault(db: &Db, owner: &str) -> sqlx::Result<Vault> {
+    if let Some(id) = crate::models::get_setting(db, owner, ACTIVE_VAULT).await?
+        && let Some(vault) = get_vault(db, owner, &id).await?
+    {
+        return Ok(vault);
+    }
+    let oldest = sqlx::query_as::<_, Vault>(
+        "SELECT * FROM vaults WHERE owner_id = ?1 ORDER BY created_at, name LIMIT 1",
+    )
+    .bind(owner)
+    .fetch_optional(db)
+    .await?;
+    let vault = match oldest {
+        Some(vault) => vault,
+        None => create_vault(db, owner, "Library").await?,
+    };
+    open_vault(db, owner, &vault.id).await?;
+    Ok(vault)
+}
+
+pub async fn open_vault(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
+    crate::models::set_setting(db, owner, ACTIVE_VAULT, id).await
+}
+
+/// Rows with no vault, which the migration leaves behind only when their owner
+/// had no user row, go into this one rather than vanishing from every list.
+pub async fn adopt_orphans(db: &Db, owner: &str, vault: &str) -> sqlx::Result<()> {
+    for sql in [
+        "UPDATE sources SET vault_id = ?2 WHERE vault_id IS NULL AND owner_id = ?1",
+        "UPDATE folders SET vault_id = ?2 WHERE vault_id IS NULL AND owner_id = ?1",
+        "UPDATE conversations SET vault_id = ?2 WHERE vault_id IS NULL AND owner_id = ?1",
+    ] {
+        sqlx::query(sql).bind(owner).bind(vault).execute(db).await?;
+    }
+    Ok(())
+}
+
+/// Move a source into another vault. Its folder stays behind, so it lands at
+/// the root.
+pub async fn move_source_to_vault(db: &Db, id: &str, vault: &str) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE sources SET vault_id = ?2, folder_id = NULL, updated_at = ?3 WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(vault)
+    .bind(now())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Move a folder into another vault with everything under it: subfolders keep
+/// their shape and files stay where they were inside them. The folder itself
+/// lands at the root. `UNION` rather than `UNION ALL`, so a cycle in the
+/// parent links ends the walk instead of running it forever.
+pub async fn move_folder_to_vault(db: &Db, owner: &str, id: &str, vault: &str) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "WITH RECURSIVE sub(id) AS (
+             SELECT id FROM folders WHERE id = ?1 AND owner_id = ?2
+             UNION SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id)
+         UPDATE sources SET vault_id = ?3 WHERE folder_id IN (SELECT id FROM sub)",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(vault)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "WITH RECURSIVE sub(id) AS (
+             SELECT id FROM folders WHERE id = ?1 AND owner_id = ?2
+             UNION SELECT f.id FROM folders f JOIN sub ON f.parent_id = sub.id)
+         UPDATE folders SET vault_id = ?3 WHERE id IN (SELECT id FROM sub)",
+    )
+    .bind(id)
+    .bind(owner)
+    .bind(vault)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE folders SET parent_id = NULL WHERE id = ?1 AND owner_id = ?2")
+        .bind(id)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
 }
 
 pub async fn set_source_status(
@@ -439,6 +618,7 @@ const SEARCH_SQL: &str = "
     JOIN sources s ON s.id = c.source_id
     WHERE chunks_fts MATCH ?1
       AND (?2 IS NULL OR c.source_id = ?2)
+      AND s.vault_id = ?4
     ORDER BY score
     LIMIT ?3";
 
@@ -446,9 +626,11 @@ const SEARCH_SQL: &str = "
 /// any-term matches fill up to the limit. Requiring every term in one chunk
 /// fails exactly when the terms live in different files: "second" in some
 /// proof and "reading" in the readings index, so the index never surfaces and
-/// the model declares the file absent after one search.
+/// the model declares the file absent after one search. Only the given vault
+/// is searched.
 pub async fn search_chunks(
     db: &Db,
+    vault: &str,
     query: &str,
     source_id: Option<&str>,
     limit: i64,
@@ -467,6 +649,7 @@ pub async fn search_chunks(
             .bind(&expr)
             .bind(source_id)
             .bind(limit)
+            .bind(vault)
             .fetch_all(db)
             .await?;
         for hit in batch {
@@ -598,8 +781,8 @@ pub struct SourceBrief {
     pub total_lines: usize,
 }
 
-pub async fn source_briefs(db: &Db, owner: &str) -> sqlx::Result<Vec<SourceBrief>> {
-    let sources = list_sources(db, owner).await?;
+pub async fn source_briefs(db: &Db, vault: &str) -> sqlx::Result<Vec<SourceBrief>> {
+    let sources = list_sources(db, vault).await?;
     let mut briefs = Vec::new();
     for source in sources {
         let doc = get_document(db, &source.id).await?;
@@ -680,15 +863,31 @@ mod search_tests {
             .execute(&db)
             .await
             .expect("user");
+        sqlx::query("INSERT INTO vaults (id, owner_id, name, created_at) VALUES ('v', 'u', 'test', ?1)")
+            .bind(now())
+            .execute(&db)
+            .await
+            .expect("vault");
         db
     }
 
     async fn add_source(db: &Db, title: &str, chunks: &[&str]) -> String {
+        add_source_in(db, "v", None, title, chunks).await
+    }
+
+    async fn add_source_in(
+        db: &Db,
+        vault: &str,
+        folder: Option<&str>,
+        title: &str,
+        chunks: &[&str],
+    ) -> String {
         let source = insert_source(
             db,
             NewSource {
                 owner_id: "u".into(),
-                folder_id: None,
+                vault_id: vault.into(),
+                folder_id: folder.map(str::to_string),
                 title: title.into(),
                 original_filename: Some(title.into()),
                 kind: "text".into(),
@@ -732,7 +931,7 @@ mod search_tests {
         add_source(&db, "notes.pdf", &["Check the second item on the list."]).await;
         add_source(&db, "both.pdf", &["The second reading group meets Friday."]).await;
 
-        let hits = search_chunks(&db, "second reading", None, 10).await.expect("search");
+        let hits = search_chunks(&db, "v", "second reading", None, 10).await.expect("search");
         let titles: Vec<&str> = hits.iter().map(|h| h.source_title.as_str()).collect();
 
         assert_eq!(titles[0], "both.pdf", "the chunk with every term still ranks first");
@@ -745,9 +944,48 @@ mod search_tests {
         let db = scratch().await;
         add_source(&db, "a.md", &["Something about induction."]).await;
 
-        let hits = search_chunks(&db, "induction", None, 10).await.expect("search");
+        let hits = search_chunks(&db, "v", "induction", None, 10).await.expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].source_title, "a.md");
+    }
+
+    /// A course's notes never answer a question asked in another course.
+    #[tokio::test]
+    async fn a_search_stays_in_its_vault() {
+        let db = scratch().await;
+        let other = create_vault(&db, "u", "other").await.expect("vault");
+        add_source(&db, "here.md", &["Induction on the naturals."]).await;
+        add_source_in(&db, &other.id, None, "there.md", &["Induction on trees."]).await;
+
+        let hits = search_chunks(&db, "v", "induction", None, 10).await.expect("search");
+        let titles: Vec<&str> = hits.iter().map(|h| h.source_title.as_str()).collect();
+        assert_eq!(titles, vec!["here.md"]);
+        assert_eq!(source_briefs(&db, &other.id).await.expect("briefs").len(), 1);
+    }
+
+    /// Moving a folder takes its subfolders and their files, and leaves the
+    /// rest of the vault alone.
+    #[tokio::test]
+    async fn moving_a_folder_takes_everything_under_it() {
+        let db = scratch().await;
+        let other = create_vault(&db, "u", "other").await.expect("vault");
+        let top = create_folder(&db, "u", "v", "MAT102", None).await.expect("folder");
+        let inner = create_folder(&db, "u", "v", "week 1", Some(&top.id)).await.expect("folder");
+        add_source_in(&db, "v", Some(&top.id), "syllabus.md", &["x"]).await;
+        add_source_in(&db, "v", Some(&inner.id), "sets.md", &["y"]).await;
+        add_source(&db, "unrelated.md", &["z"]).await;
+
+        move_folder_to_vault(&db, "u", &top.id, &other.id).await.expect("move");
+
+        let moved: Vec<String> = list_sources(&db, &other.id)
+            .await
+            .expect("list")
+            .into_iter()
+            .map(|s| s.title)
+            .collect();
+        assert_eq!(moved, vec!["sets.md", "syllabus.md"]);
+        assert_eq!(list_folders(&db, &other.id).await.expect("folders").len(), 2);
+        assert_eq!(list_sources(&db, "v").await.expect("list").len(), 1);
     }
 }
 
@@ -757,6 +995,8 @@ mod search_tests {
 pub struct Conversation {
     pub id: String,
     pub owner_id: String,
+    /// The vault whose sources it searches. Opening it opens that vault.
+    pub vault_id: Option<String>,
     pub title: String,
     /// Set once the conversation has been compacted. Stands in for every
     /// message marked `compacted` when the next prompt is assembled.
@@ -766,17 +1006,23 @@ pub struct Conversation {
     pub updated_at: String,
 }
 
-pub async fn create_conversation(db: &Db, owner: &str, title: &str) -> sqlx::Result<Conversation> {
+pub async fn create_conversation(
+    db: &Db,
+    owner: &str,
+    vault: &str,
+    title: &str,
+) -> sqlx::Result<Conversation> {
     let id = new_id();
     let ts = now();
     sqlx::query(
-        "INSERT INTO conversations (id, owner_id, title, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?4)",
+        "INSERT INTO conversations (id, owner_id, vault_id, title, created_at, updated_at)
+         VALUES (?1, ?2, ?5, ?3, ?4, ?4)",
     )
     .bind(&id)
     .bind(owner)
     .bind(title)
     .bind(&ts)
+    .bind(vault)
     .execute(db)
     .await?;
     get_conversation(db, owner, &id).await?.ok_or(sqlx::Error::RowNotFound)
@@ -807,18 +1053,23 @@ pub struct ConversationSummary {
     pub compacted: bool,
 }
 
-pub async fn list_conversations(db: &Db, owner: &str) -> sqlx::Result<Vec<ConversationSummary>> {
+pub async fn list_conversations(
+    db: &Db,
+    owner: &str,
+    vault: &str,
+) -> sqlx::Result<Vec<ConversationSummary>> {
     sqlx::query_as::<_, ConversationSummary>(
         "SELECT c.id, c.title, c.created_at, c.updated_at,
                 (SELECT count(*) FROM messages m WHERE m.conversation_id = c.id)
                     AS message_count,
                 (c.summary IS NOT NULL) AS compacted
            FROM conversations c
-          WHERE c.owner_id = ?1
+          WHERE c.owner_id = ?1 AND c.vault_id = ?2
             AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
           ORDER BY c.updated_at DESC",
     )
     .bind(owner)
+    .bind(vault)
     .fetch_all(db)
     .await
 }
@@ -1058,7 +1309,8 @@ mod rewind_tests {
             .execute(&db)
             .await
             .expect("user");
-        let c = create_conversation(&db, "u", "test").await.expect("conversation");
+        let vault = create_vault(&db, "u", "test").await.expect("vault");
+        let c = create_conversation(&db, "u", &vault.id, "test").await.expect("conversation");
         (db, c.id)
     }
 

@@ -126,6 +126,30 @@
                    background:transparent; }
   .rail-progress i { display:block; height:100%; width:0; background:var(--accent);
                      transition:width .3s ease; }
+  /* The open vault under the status line, with settings beside it. The chip
+     hugs its name so the gear stays pinned to the right edge. */
+  aside { position:relative; }
+  .vault-bar { height:44px; flex:none; display:flex; align-items:center; gap:2px;
+               padding:0 6px; border-top:1px solid var(--line); }
+  .vault-chip { display:flex; align-items:center; gap:6px; min-width:0; flex:0 1 auto;
+                background:transparent; border:0; border-radius:7px; padding:5px 8px;
+                color:var(--fg); font-weight:600; font-size:13px; }
+  .vault-chip:hover { background:var(--hover); }
+  .vault-chip svg { flex:none; color:var(--faint); }
+  .vault-chip span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .vault-bar .icon-btn { padding:6px; }
+  .pop.vault-pop { left:8px; right:auto; bottom:50px; min-width:210px; max-width:248px; }
+  .row .vname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row .with-ico { display:flex; align-items:center; gap:8px; color:var(--dim); }
+  .vault-row { display:flex; align-items:center; gap:6px; padding:10px 2px;
+               border-bottom:1px solid #2e2d2b; }
+  .vault-row .vn { flex:1; min-width:0; }
+  .vault-row .vn b { display:block; overflow:hidden; text-overflow:ellipsis;
+                     white-space:nowrap; }
+  .vault-new { display:flex; gap:8px; margin:14px 0 10px; }
+  .setting { display:flex; align-items:center; justify-content:space-between; gap:16px;
+             padding:11px 0; border-bottom:1px solid #2e2d2b; }
+  .setting select { width:250px; flex:none; }
 
   /* ------------------------------------------------------------ chat */
   /* min-height:0 on both, or the grid item and the flex child size themselves
@@ -496,6 +520,24 @@
     <div class="rail-progress"><i id="railProgress"></i></div>
     <span id="treeStatus">0 files</span>
   </div>
+  <div class="vault-bar">
+    <button class="vault-chip" id="vaultBtn" title="Switch vault">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5 6.2l3-3 3 3M5 9.8l3 3 3-3"/>
+      </svg>
+      <span id="vaultName">Vault</span>
+    </button>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="settingsBtn" title="Settings">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+    </button>
+  </div>
+  <div class="pop vault-pop" id="vaultPop" hidden></div>
   <input id="file" type="file" multiple hidden>
 </aside>
 
@@ -647,6 +689,58 @@
   </div>
 </div>
 
+<!-- -------------------------------------------------------- vaults ---- -->
+<div class="modal" id="vaultManager" hidden>
+  <div class="sheet" style="width:min(560px,100%)">
+    <header><b>Vaults</b><span class="spacer"></span>
+      <button class="btn ghost" id="closeVaults">Close</button></header>
+    <div class="scroll" style="padding-top:6px">
+      <div id="vaultRows"></div>
+      <div class="vault-new">
+        <input type="text" id="newVaultName" class="grow" placeholder="New vault name, e.g. MAT102">
+        <button class="btn" id="createVaultBtn">Create vault</button>
+      </div>
+      <div class="hint" id="vaultHint">
+        Each vault keeps its own sources, folders and chats, and a chat only
+        searches the vault it was started in. Right click a file or folder and
+        pick Move to vault to sort an existing library.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ------------------------------------------------------ settings ---- -->
+<div class="modal" id="settings" hidden>
+  <div class="sheet" style="width:min(600px,100%)">
+    <header><b>Settings</b><span class="spacer"></span>
+      <button class="btn ghost" id="closeSettings">Close</button></header>
+    <div class="scroll">
+      <h2 class="section" style="margin-top:14px">Models</h2>
+      <div class="setting">
+        <div><b>Researcher</b><div class="hint">Answers your questions by searching and reading sources.</div></div>
+        <select id="setResearcher"></select>
+      </div>
+      <div class="setting">
+        <div><b>Analyzer</b><div class="hint">Reads each upload once. Only models that can see are offered.</div></div>
+        <select id="setAnalyzer"></select>
+      </div>
+      <div class="setting">
+        <div><b>Thinking effort</b><div class="hint">How long the researcher may reason before it answers.</div></div>
+        <select id="setEffort"></select>
+      </div>
+      <div class="setting">
+        <div><b>Providers and models</b><div class="hint">Connect endpoints, pin models to the picker, fix capability tags.</div></div>
+        <button class="btn ghost" id="openConfigureBtn">Configure</button>
+      </div>
+      <h2 class="section">Vault</h2>
+      <div class="setting">
+        <div><b id="setVaultName"></b><div class="hint" id="setVaultCounts"></div></div>
+        <button class="btn ghost" id="setManageVaults">Manage vaults</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
 const state = {
@@ -655,7 +749,7 @@ const state = {
   settings: { pinned: [], researcher: null, thinking_effort: 'off' },
   activeModel: null, context: { used: 0, window: 0 },
   models: [], providers: [], roles: {}, editingProvider: null, dropTarget: null,
-  chats: [], cmdIndex: 0,
+  chats: [], cmdIndex: 0, vaults: [], vault: null,
   uploading: 0, analysisTotal: 0, analysisTimer: null,
   rowOrder: [], anchorId: null, treeSignature: '', dragScroll: 0, dragScrollTimer: null,
 };
@@ -719,6 +813,8 @@ async function loadTree() {
   const previous = new Map(state.sources.map(s => [s.id, s.status]));
   state.sources = data.sources;
   state.folders = data.folders;
+  // Another tab may have switched vaults; the chip should say what is listed.
+  if (data.vault_id && state.vault && data.vault_id !== state.vault.id) loadVaults();
   renderTree();
 
   // Anything that just finished is worth saying out loud, since the file may
@@ -1277,6 +1373,8 @@ function sourceMenu(e, source) {
         await api('/api/sources/' + source.id, { method: 'PATCH', json: { folder_id: null } });
         loadTree();
       } }] : []),
+    ...(state.vaults.length > 1 ? [{ label: 'Move to vault',
+        run: () => moveSourcesToVault(selectionCount(source) > 1 ? [...state.selected] : [source.id]) }] : []),
     { label: 'Re-run analyzer', run: () => reanalyze(source, null) },
     '-',
     { label: selectionCount(source) > 1 ? `Delete ${selectionCount(source)} sources` : 'Delete',
@@ -1296,6 +1394,7 @@ function folderMenu(e, folder) {
         await api('/api/folders/' + folder.id, { method: 'PATCH', json: { name } });
         loadTree();
       } },
+    ...(state.vaults.length > 1 ? [{ label: 'Move to vault', run: () => moveFolderToVault(folder) }] : []),
     { label: 'Delete folder', danger: true, run: async () => {
         if (!await ask('Delete folder', `"${folder.name}" goes away. The files inside it move to the root.`)) return;
         await api('/api/folders/' + folder.id, { method: 'DELETE' });
@@ -3120,6 +3219,9 @@ $('#searchBtn').onclick = async () => {
 
 /* ------------------------------------------------------ conversations */
 const LAST_CHAT_KEY = 'notebook.conversation';
+// Each vault remembers its own last conversation, so switching back to one
+// lands where you left it.
+const lastChatKey = () => LAST_CHAT_KEY + (state.vault ? '.' + state.vault.id : '');
 
 /* The address bar is the permalink: /c/<id> for a conversation, / for a fresh
    one. History entries mean back and forward walk the conversations too. */
@@ -3220,7 +3322,7 @@ function newConversation({ fromHistory = false } = {}) {
   state.attached = [];
   renderAttachments();
   state.context = { used: 0, window: state.activeModel?.context_window || 0 };
-  localStorage.removeItem(LAST_CHAT_KEY);
+  localStorage.removeItem(lastChatKey());
   if (!fromHistory) setUrl(null);
   $('#thread').innerHTML = '';
   renderContext();
@@ -3237,16 +3339,20 @@ async function openConversation(id, { fromHistory = false } = {}) {
     data = await api('/api/conversations/' + id);
   } catch (e) {
     // A stale link or a deleted conversation should not strand the page.
-    localStorage.removeItem(LAST_CHAT_KEY);
+    localStorage.removeItem(lastChatKey());
     if (conversationFromUrl() === id) setUrl(null, { replace: true });
     note('That conversation is gone: ' + e.message, true);
-    return;
+    return false;
   }
+  // A conversation searches the vault it was started in, so opening one from
+  // another vault (a pasted link, the back button) opens that vault too.
+  const vaultId = data.conversation.vault_id;
+  if (vaultId && vaultId !== state.vault?.id) await openVault(vaultId, { keepConversation: true });
 
   state.conversationId = id;
   state.attached = [];
   renderAttachments();
-  localStorage.setItem(LAST_CHAT_KEY, id);
+  localStorage.setItem(lastChatKey(), id);
   if (!fromHistory) setUrl(id);
   $('#thread').innerHTML = '';
 
@@ -3286,6 +3392,7 @@ async function openConversation(id, { fromHistory = false } = {}) {
   };
   renderContext();
   loadChats();
+  return true;
 }
 
 function drawDivider(text) {
@@ -3473,6 +3580,263 @@ async function loadSettings() {
   if (!state.context.used && state.activeModel)
     state.context.window = state.activeModel.context_window || 0;
   renderBar(); renderEffort();
+}
+
+/* ------------------------------------------------------------- vaults */
+/* A vault is a separate library: its own sources, folders and chats. One is
+   open at a time; the rail, the chat list and a new conversation all follow
+   it, and nothing selected, attached or open carries across a switch. */
+const VAULT_ICON = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" ' +
+  'stroke="currentColor" stroke-width="1.3"><rect x="2.3" y="2.3" width="11.4" height="11.4" rx="1.6"/>' +
+  '<circle cx="8" cy="8" r="2.3"/><path d="M8 4.2v1.5M8 10.3v1.5M4.2 8h1.5M10.3 8h1.5"/></svg>';
+
+function applyVaults(data) {
+  state.vaults = data.vaults;
+  state.vault = data.vaults.find(v => v.id === data.active) || data.vaults[0] || null;
+  const name = state.vault?.name || 'Vault';
+  $('#vaultName').textContent = name;
+  $('#vaultBtn').title = `${name}: switch vault`;
+}
+
+async function loadVaults() { applyVaults(await api('/api/vaults')); }
+
+async function openVault(id, { keepConversation = false } = {}) {
+  if (composer.busy) stopTurn();
+  let data;
+  try {
+    data = await api('/api/vaults/' + id + '/open', { method: 'POST' });
+  } catch (e) {
+    return note(e.message, true);
+  }
+  applyVaults(data);
+  state.selected.clear();
+  state.open.clear();
+  state.selectedNode = null;
+  state.anchorId = null;
+  state.treeSignature = '';
+  state.analysisTotal = 0;
+  if (state.viewerSource) closeViewer();
+  await loadTree();
+  if (keepConversation) return;
+  const last = localStorage.getItem(lastChatKey());
+  if (!last || !await openConversation(last)) newConversation();
+}
+
+$('#vaultBtn').onclick = e => {
+  // The document handler closes pops on any click outside one.
+  e.stopPropagation();
+  renderVaultPop();
+  togglePop('vaultPop');
+};
+
+function renderVaultPop() {
+  const pop = $('#vaultPop');
+  pop.innerHTML = '';
+  for (const v of state.vaults) {
+    const on = v.id === state.vault?.id;
+    const b = document.createElement('button');
+    b.className = 'row';
+    b.innerHTML = '<span class="vname"></span><span class="sub"></span>';
+    b.children[0].textContent = v.name;
+    b.children[1].textContent = on ? '✓' : '';
+    if (on) b.children[1].className = 'tick';
+    b.onclick = () => { togglePop(null); if (!on) openVault(v.id); };
+    pop.append(b);
+  }
+  pop.append(Object.assign(document.createElement('div'), { className: 'sep' }));
+  const manage = document.createElement('button');
+  manage.className = 'row';
+  manage.innerHTML = `<span class="with-ico">${VAULT_ICON}Manage vaults…</span>`;
+  manage.onclick = () => { togglePop(null); openVaultManager(); };
+  pop.append(manage);
+}
+
+async function openVaultManager() {
+  $('#vaultManager').hidden = false;
+  $('#newVaultName').value = '';
+  $('#vaultHint').className = 'hint';
+  await loadVaults();
+  renderVaultManager();
+  $('#newVaultName').focus();
+}
+$('#closeVaults').onclick = () => { $('#vaultManager').hidden = true; };
+$('#vaultManager').onclick = e => { if (e.target.id === 'vaultManager') e.target.hidden = true; };
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function renderVaultManager() {
+  const rows = $('#vaultRows');
+  rows.innerHTML = '';
+  for (const v of state.vaults) {
+    const on = v.id === state.vault?.id;
+    const row = document.createElement('div');
+    row.className = 'vault-row';
+    row.innerHTML = '<div class="vn"><b></b><div class="hint"></div></div>';
+    row.querySelector('b').textContent = v.name;
+    row.querySelector('.hint').textContent =
+      `${plural(v.source_count, 'source')}, ${plural(v.conversation_count, 'chat')}`;
+    if (!on) {
+      row.append(mkBtn('Open', 'btn ghost sm', async () => {
+        $('#vaultManager').hidden = true;
+        await openVault(v.id);
+      }));
+    }
+    const del = mkBtn('Delete', 'btn danger sm', () => deleteVault(v));
+    if (state.vaults.length < 2) {
+      del.disabled = true;
+      del.title = 'The only vault cannot be deleted';
+    }
+    row.append(mkBtn('Rename', 'btn ghost sm', () => renameVault(v)), del);
+    rows.append(row);
+  }
+}
+
+async function createVault() {
+  const input = $('#newVaultName');
+  const name = input.value.trim();
+  if (!name) return input.focus();
+  try {
+    const vault = await api('/api/vaults', { method: 'POST', json: { name } });
+    $('#vaultManager').hidden = true;
+    await openVault(vault.id);
+  } catch (e) {
+    $('#vaultHint').className = 'hint bad';
+    $('#vaultHint').textContent = e.message;
+  }
+}
+$('#createVaultBtn').onclick = createVault;
+$('#newVaultName').onkeydown = e => { if (e.key === 'Enter') createVault(); };
+
+async function renameVault(vault) {
+  const name = await askText('Rename vault', vault.name);
+  if (!name || name === vault.name) return;
+  try {
+    await api('/api/vaults/' + vault.id, { method: 'PATCH', json: { name } });
+  } catch (e) {
+    return say(e.message, 'Could not rename that vault');
+  }
+  await loadVaults();
+  renderVaultManager();
+}
+
+async function deleteVault(vault) {
+  const held = [vault.source_count && plural(vault.source_count, 'source'),
+                vault.conversation_count && plural(vault.conversation_count, 'conversation')]
+    .filter(Boolean);
+  const message = `"${vault.name}"${held.length ? ' and its ' + held.join(' and ') : ''} ` +
+    'go away for good. A stored file another vault also uses is kept.';
+  if (!await ask('Delete vault', message)) return;
+  try {
+    await api('/api/vaults/' + vault.id, { method: 'DELETE' });
+  } catch (e) {
+    return say(e.message, 'Could not delete that vault');
+  }
+  const wasOpen = vault.id === state.vault?.id;
+  // Listing again settles which vault is open when the open one just went.
+  await loadVaults();
+  if (wasOpen) await openVault(state.vault.id);
+  renderVaultManager();
+}
+
+function pickVault(title, message) {
+  const choices = state.vaults.filter(v => v.id !== state.vault?.id)
+    .map(v => ({ value: v.id, label: v.name }));
+  return askChoice(title, message, choices, 'Move');
+}
+
+async function moveSourcesToVault(ids) {
+  const many = ids.length > 1;
+  const title = state.sources.find(s => s.id === ids[0])?.title;
+  const vaultId = await pickVault(many ? `Move ${ids.length} sources` : 'Move source',
+    many ? `Which vault should these ${ids.length} files go to? They land at its root.`
+         : `Which vault should "${title}" go to? It lands at the root.`);
+  if (!vaultId) return;
+  try {
+    for (const id of ids) {
+      await api('/api/sources/' + id, { method: 'PATCH', json: { vault_id: vaultId } });
+      state.selected.delete(id);
+      if (state.viewerSource?.id === id) closeViewer();
+    }
+  } catch (e) {
+    note(e.message, true);
+  }
+  loadTree();
+  loadVaults();
+}
+
+async function moveFolderToVault(folder) {
+  const vaultId = await pickVault('Move folder',
+    `Which vault should "${folder.name}" go to? Its subfolders and files go with it.`);
+  if (!vaultId) return;
+  try {
+    await api('/api/folders/' + folder.id, { method: 'PATCH', json: { vault_id: vaultId } });
+  } catch (e) {
+    return note(e.message, true);
+  }
+  await loadTree();
+  if (state.viewerSource && !state.sources.some(s => s.id === state.viewerSource.id)) closeViewer();
+  loadVaults();
+}
+
+/* ----------------------------------------------------------- settings */
+/* One place for what can be set. Models first, since they are what there is;
+   Configure stays the place for providers and the full model table. */
+$('#settingsBtn').onclick = openSettings;
+$('#closeSettings').onclick = () => { $('#settings').hidden = true; };
+$('#settings').onclick = e => { if (e.target.id === 'settings') e.target.hidden = true; };
+$('#openConfigureBtn').onclick = () => { $('#settings').hidden = true; openConfigure(); };
+$('#setManageVaults').onclick = () => { $('#settings').hidden = true; openVaultManager(); };
+$('#setResearcher').onchange = e => saveSetting({ researcher_model: e.target.value });
+$('#setAnalyzer').onchange = e => saveSetting({ analyzer_model: e.target.value });
+$('#setEffort').onchange = e => saveSetting({ thinking_effort: e.target.value });
+
+async function openSettings() {
+  $('#settings').hidden = false;
+  await renderSettings();
+}
+
+async function renderSettings() {
+  const [{ models }, settings] = await Promise.all([api('/api/models'), api('/api/settings')]);
+  state.settings = settings;
+  // Pinned first, since those are the ones in use.
+  const order = [...models].sort((a, b) => Number(b.pinned) - Number(a.pinned));
+  const seeing = order.filter(m => m.supports_vision);
+  fillModelSelect($('#setResearcher'), order, settings.researcher);
+  fillModelSelect($('#setAnalyzer'), seeing.length ? seeing : order, settings.analyzer);
+
+  const effort = $('#setEffort');
+  effort.innerHTML = '';
+  for (const [key, label, hint] of EFFORTS) effort.append(new Option(`${label}, ${hint}`, key));
+  effort.value = settings.thinking_effort || 'off';
+
+  const vault = state.vaults.find(v => v.id === state.vault?.id);
+  $('#setVaultName').textContent = vault?.name || '';
+  $('#setVaultCounts').textContent = vault
+    ? `Open now, ${plural(vault.source_count, 'source')}, ${plural(vault.conversation_count, 'chat')}`
+    : '';
+}
+
+/* The role's current model is always an option, even when it is hidden or
+   cannot see, so the select never claims a model that is not the one in use. */
+function fillModelSelect(select, models, current) {
+  select.innerHTML = '';
+  const label = m => `${m.display_name} (${m.provider_name})`;
+  const list = current && !models.some(m => m.id === current.id) ? [current, ...models] : models;
+  select.disabled = !list.length;
+  if (!list.length) return select.append(new Option('No models yet', ''));
+  for (const m of list) select.append(new Option(label(m), m.id));
+  select.value = current?.id || list[0].id;
+}
+
+async function saveSetting(patch) {
+  try {
+    await api('/api/settings', { method: 'PATCH', json: patch });
+  } catch (e) {
+    say(e.message, 'Could not save that');
+  }
+  // The prompt bar shows the researcher and the effort, so it follows.
+  await loadSettings();
+  renderSettings();
 }
 
 /* ---------------------------------------------------------- configure */
@@ -3803,10 +4167,11 @@ document.addEventListener('keydown', e => {
 });
 
 (async () => {
+  await loadVaults();
   await loadTree();
   await loadSettings();
   await loadChats();
-  const wanted = conversationFromUrl() || localStorage.getItem(LAST_CHAT_KEY);
+  const wanted = conversationFromUrl() || localStorage.getItem(lastChatKey());
   if (wanted) await openConversation(wanted, { fromHistory: true });
   setUrl(state.conversationId, { replace: true });
   emptyState();

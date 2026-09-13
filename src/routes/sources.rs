@@ -71,6 +71,7 @@ pub async fn upload(
         return Err(AppError::BadRequest("missing `file` field".into()));
     }
     let single = files.len() == 1;
+    let vault = db::active_vault(&state.db, &state.user_id).await?;
 
     let mut uploaded: Vec<Uploaded> = Vec::new();
     let mut rejected: Vec<Rejected> = Vec::new();
@@ -109,6 +110,7 @@ pub async fn upload(
             &state.db,
             NewSource {
                 owner_id: state.user_id.clone(),
+                vault_id: vault.id.clone(),
                 folder_id: folder_id.clone(),
                 title: title
                     .clone()
@@ -138,12 +140,13 @@ pub async fn upload(
     Ok(Json(json!({ "uploaded": uploaded, "rejected": rejected })))
 }
 
-/// `GET /api/sources` returns everything the explorer draws: folders and
-/// sources together, each carrying its parent.
+/// `GET /api/sources` returns everything the explorer draws for the open
+/// vault: folders and sources together, each carrying its parent.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
-    let sources = db::list_sources(&state.db, &state.user_id).await?;
-    let folders = db::list_folders(&state.db, &state.user_id).await?;
-    Ok(Json(json!({ "sources": sources, "folders": folders })))
+    let vault = db::active_vault(&state.db, &state.user_id).await?;
+    let sources = db::list_sources(&state.db, &vault.id).await?;
+    let folders = db::list_folders(&state.db, &vault.id).await?;
+    Ok(Json(json!({ "vault_id": vault.id, "sources": sources, "folders": folders })))
 }
 
 pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Source>> {
@@ -165,9 +168,13 @@ pub struct SourcePatch {
     pub title: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     pub folder_id: Option<Option<String>>,
+    /// Move to another vault, landing at its root.
+    #[serde(default)]
+    pub vault_id: Option<String>,
 }
 
-/// `PATCH /api/sources/{id}` renames a source or moves it between folders.
+/// `PATCH /api/sources/{id}` renames a source, moves it between folders, or
+/// moves it to another vault.
 pub async fn patch(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -176,7 +183,17 @@ pub async fn patch(
     let source = load(&state, &id).await?;
     let title = body.title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
     db::update_source(&state.db, &source.id, title.as_deref(), body.folder_id).await?;
+    if let Some(vault) = &body.vault_id {
+        let vault = owned_vault(&state, vault).await?;
+        db::move_source_to_vault(&state.db, &source.id, &vault.id).await?;
+    }
     Ok(Json(load(&state, &id).await?))
+}
+
+async fn owned_vault(state: &AppState, id: &str) -> AppResult<db::Vault> {
+    db::get_vault(&state.db, &state.user_id, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("vault {id}")))
 }
 
 /// `GET /api/sources/{id}/document` returns the analyzer's markdown rendition.
@@ -292,7 +309,10 @@ pub async fn search(
     Query(params): Query<SearchParams>,
 ) -> AppResult<Json<Value>> {
     let limit = params.limit.unwrap_or(10).clamp(1, 50);
-    let hits = db::search_chunks(&state.db, &params.q, params.source_id.as_deref(), limit).await?;
+    let vault = db::active_vault(&state.db, &state.user_id).await?;
+    let hits =
+        db::search_chunks(&state.db, &vault.id, &params.q, params.source_id.as_deref(), limit)
+            .await?;
     Ok(Json(json!({ "query": params.q, "hits": hits })))
 }
 
@@ -313,7 +333,11 @@ pub async fn create_folder(
     if name.is_empty() {
         return Err(AppError::BadRequest("folder name is empty".into()));
     }
-    Ok(Json(db::create_folder(&state.db, &state.user_id, name, body.parent_id.as_deref()).await?))
+    let vault = db::active_vault(&state.db, &state.user_id).await?;
+    Ok(Json(
+        db::create_folder(&state.db, &state.user_id, &vault.id, name, body.parent_id.as_deref())
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -322,6 +346,9 @@ pub struct FolderPatch {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     pub parent_id: Option<Option<String>>,
+    /// Move the folder and everything under it to another vault.
+    #[serde(default)]
+    pub vault_id: Option<String>,
 }
 
 pub async fn patch_folder(
@@ -338,6 +365,10 @@ pub async fn patch_folder(
     }
     let name = body.name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
     db::update_folder(&state.db, &state.user_id, &id, name.as_deref(), body.parent_id).await?;
+    if let Some(vault) = &body.vault_id {
+        let vault = owned_vault(&state, vault).await?;
+        db::move_folder_to_vault(&state.db, &state.user_id, &id, &vault.id).await?;
+    }
     Ok(Json(json!({ "updated": id })))
 }
 

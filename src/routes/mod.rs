@@ -3,6 +3,7 @@ pub mod conversations;
 pub mod health;
 pub mod models;
 pub mod sources;
+pub mod vaults;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -17,6 +18,9 @@ pub fn router(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/health", get(health::health))
+        .route("/vaults", get(vaults::list).post(vaults::create))
+        .route("/vaults/{id}", patch(vaults::rename).delete(vaults::delete))
+        .route("/vaults/{id}/open", post(vaults::open))
         .route("/sources", get(sources::list).post(sources::upload))
         .route(
             "/sources/{id}",

@@ -887,6 +887,10 @@ fn parse_remote(m: &serde_json::Value) -> Option<RemoteModel> {
 /// working. Once a provider exists, the environment is ignored entirely.
 pub async fn bootstrap(db: &Db, cfg: &Config) -> anyhow::Result<String> {
     let user = ensure_user(db, LOCAL_USER, "Local").await?;
+    // Every upload lands in a vault, so a fresh database gets one, and anything
+    // the vaults migration could not place goes into it.
+    let vault = crate::db::active_vault(db, &user.id).await?;
+    crate::db::adopt_orphans(db, &user.id, &vault.id).await?;
 
     if !list_providers(db, &user.id).await?.is_empty() {
         return Ok(user.id);
