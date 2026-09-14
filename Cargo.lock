@@ -1574,6 +1574,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hayro",
+ "kurbo",
  "mime_guess",
  "miniz_oxide 0.9.1",
  "png",

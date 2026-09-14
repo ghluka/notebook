@@ -1354,9 +1354,11 @@ document.addEventListener('contextmenu', () => { $('#ctx').hidden = true; });
 $('#tree').oncontextmenu = e => {
   if (e.target.closest('.node')) return;
   e.preventDefault();
+  const failed = state.sources.filter(s => s.status === 'failed').map(s => s.id);
   showMenu(e, [
     { label: 'Upload files', run: () => $('#file').click() },
     { label: 'New folder', run: () => createFolder(null) },
+    ...(failed.length ? ['-', { label: `Re-run ${failed.length} failed`, run: () => reanalyzeMany(failed) }] : []),
   ]);
 };
 
@@ -1375,7 +1377,8 @@ function sourceMenu(e, source) {
       } }] : []),
     ...(state.vaults.length > 1 ? [{ label: 'Move to vault',
         run: () => moveSourcesToVault(selectionCount(source) > 1 ? [...state.selected] : [source.id]) }] : []),
-    { label: 'Re-run analyzer', run: () => reanalyze(source, null) },
+    { label: selectionCount(source) > 1 ? `Re-run analyzer on ${selectionCount(source)}` : 'Re-run analyzer',
+      run: () => selectionCount(source) > 1 ? reanalyzeMany([...state.selected]) : reanalyze(source, null) },
     '-',
     { label: selectionCount(source) > 1 ? `Delete ${selectionCount(source)} sources` : 'Delete',
       danger: true,
@@ -1463,6 +1466,22 @@ async function reanalyze(source, modelId) {
     await analyzerFailed(source, e);
   }
   // The outcome arrives through the status watcher, not this request.
+  state.analysisTotal = 0;
+  loadTree();
+}
+
+/* Queue several files at once. The server analyzes one at a time, so this
+   only fills its queue; the rows spin and the footer counts them down. */
+async function reanalyzeMany(ids) {
+  note(`queued ${ids.length} files for the analyzer`);
+  for (const id of ids) {
+    try {
+      await api('/api/sources/' + id + '/reingest', { method: 'POST', json: {} });
+    } catch (e) {
+      const source = state.sources.find(s => s.id === id);
+      note(`${source?.title || 'a file'}: ${e.message}`, true);
+    }
+  }
   state.analysisTotal = 0;
   loadTree();
 }

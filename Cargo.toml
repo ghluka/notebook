@@ -12,6 +12,9 @@ chrono = { version = "0.4.45", features = ["serde"] }
 dotenvy = "0.15.7"
 futures = "0.3.34"
 hayro = "0.7.1"
+# The geometry types in hayro's Device trait, which the text extractor
+# implements. Already in the tree through hayro; this names the same version.
+kurbo = "0.13.1"
 mime_guess = "2.0.5"
 miniz_oxide = "0.9"
 png = "0.18.1"

@@ -418,6 +418,26 @@ it as if it were the source. Storing that is worse than failing.
   extraction itself is stored as the rendition, under a note saying so. A plain
   rendition that is true beats a fluent one that is not: it is searchable,
   citable, and nothing in it was invented.
+- **The text layer is read through the fonts.** Word, LaTeX and journal PDFs
+  store text as glyph ids that mean nothing without the font's ToUnicode map,
+  so scanning the file's raw strings finds gibberish, and for a while that
+  judged nearly every real paper to have no text layer at all, leaving it at
+  the mercy of the vision model. `render::extract_text` runs hayro's
+  interpreter, the one that draws the page images, with a device that writes
+  down each glyph's character instead of drawing it. Spacing comes from where
+  the glyphs land: a lower baseline is a new line, a large drop or a jump back
+  up to the next column is a new paragraph, a gap wider than a thin space is a
+  word break. Ligatures are unfolded, since "classiﬁcation" with the ﬁ glyph
+  is a different word to the search index. Invisible text, a scanned paper's
+  OCR, counts. Each page sits under its own `## p. N` header, so a text-layer
+  rendition cites by page like a page-image one. The raw string scan is kept
+  only for files the interpreter cannot parse.
+- **The analyzer reasons only when its model is tagged thinking.** The effort
+  in the prompt bar is chosen for the researcher; a model without the tag
+  gets none for transcription (`analyzer_effort`). An empty reply says why:
+  the output limit reached (and whether it went on reasoning), reasoning with
+  no text, or the stop reason the provider gave, rather than "returned no
+  text", which sent people hunting for a model that can see.
 - **A failed run leaves no description behind.** When a run fails this way and
   what is already stored is itself a description, that rendition and its chunks
   are dropped, so a source the explorer marks `failed` is not still answering

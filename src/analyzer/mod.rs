@@ -176,6 +176,9 @@ async fn analyzer_chat(
 ) -> AppResult<String> {
     let client = resolved.client(&state.http)?;
     match crate::llm::chat_with_retry(client.as_ref(), req).await {
+        Ok(response) if response.text.trim().is_empty() => {
+            Err(AppError::Unsupported(empty_reply(&resolved.model.display_name, &response)))
+        }
         Ok(response) => Ok(response.text),
         Err(e) if e.is_rate_limited() => Err(AppError::from_rate_limit(
             e,
@@ -185,6 +188,38 @@ async fn analyzer_chat(
         )),
         Err(e) => Err(AppError::Llm(e)),
     }
+}
+
+/// Why a reply came back with no text. "Returned no text" alone sends people
+/// looking for a model that can see, when the usual cause is a model spending
+/// its whole output budget on reasoning, which a lower effort or a larger
+/// output limit fixes and a different model may not.
+fn empty_reply(model: &str, response: &crate::llm::ChatResponse) -> String {
+    let reasoned = response.thinking.as_deref().is_some_and(|t| !t.trim().is_empty());
+    match response.stop_reason.as_str() {
+        "length" | "max_tokens" => format!(
+            "the analyzer model {model} hit its output limit after {} tokens{} without \
+             writing any text; turn the thinking effort down, or raise the model's max \
+             output in Configure",
+            response.usage.output_tokens,
+            if reasoned { " of reasoning" } else { "" }
+        ),
+        _ if reasoned => format!("the analyzer model {model} reasoned but wrote no text"),
+        other => format!("the analyzer model {model} sent back an empty reply (stop reason: {other})"),
+    }
+}
+
+/// The thinking effort for an analyzer call. The prompt bar's effort is chosen
+/// for the researcher; a model not tagged thinking is sent none, so a high
+/// setting there does not turn every transcription into a reasoning run.
+async fn analyzer_effort(
+    state: &AppState,
+    resolved: &crate::models::Resolved,
+) -> AppResult<crate::llm::Effort> {
+    if !resolved.model.supports_thinking {
+        return Ok(crate::llm::Effort::Off);
+    }
+    Ok(crate::models::effort(&state.db, &state.user_id).await?)
 }
 
 /// Which model does the analyzing. `override_id` comes from a client retrying
@@ -570,7 +605,6 @@ async fn analyze_media(
     model_override: Option<&str>,
 ) -> AppResult<(String, Option<String>)> {
     use crate::llm::{ChatRequest, ContentPart, Message, Role, part_for_file};
-    use crate::models;
 
     let bytes = state.storage.read(&source.storage_path).await?;
     let limit = match kind {
@@ -636,7 +670,7 @@ async fn analyze_media(
          describe what the file actually contains.",
     )
     .max_tokens(resolved.model.max_output_tokens.max(1024) as u32)
-    .effort(models::effort(&state.db, &state.user_id).await?);
+    .effort(analyzer_effort(state, &resolved).await?);
 
     let text = analyzer_chat(state, &resolved, &req, &format!(" on this {} file", kind.as_str()))
         .await
@@ -684,9 +718,8 @@ async fn analyze_page_images(
     total: usize,
 ) -> AppResult<(String, Option<String>)> {
     use crate::llm::{ChatRequest, ContentPart, Message, Role};
-    use crate::models;
 
-    let effort = models::effort(&state.db, &state.user_id).await?;
+    let effort = analyzer_effort(state, resolved).await?;
     let max_tokens = resolved.model.max_output_tokens.max(4096) as u32;
     let mut sections = Vec::new();
     let mut unreadable = Vec::new();
@@ -823,7 +856,6 @@ async fn structure_text_layer(
     extracted: &str,
 ) -> AppResult<(String, Option<String>)> {
     use crate::llm::{ChatRequest, Message};
-    use crate::models;
 
     let (input, truncated) = truncate_chars(extracted, PDF_TEXT_INPUT_MAX);
     let req = ChatRequest::new(
@@ -834,9 +866,9 @@ async fn structure_text_layer(
              research notebook: keep every section, in order, as faithful \
              transcription, not a summary. Use `#` headings for the \
              document's own headings, keep its lists and tables with their \
-             numbers, and write mathematics as LaTeX. Page breaks are not \
-             visible in the extraction, so do not invent `p. N` markers, \
-             just transcribe in order.{}\n\n{}",
+             numbers, and write mathematics as LaTeX. Each page of the \
+             extraction starts with a `## p. N` header: keep every one where \
+             it is, so passages can be cited by page.{}\n\n{}",
             if truncated {
                 " The text was truncated to fit; transcribe what is here and \
                  end with one line saying the tail is missing."
@@ -856,7 +888,7 @@ async fn structure_text_layer(
          guessing.",
     )
     .max_tokens(resolved.model.max_output_tokens.max(1024) as u32)
-    .effort(models::effort(&state.db, &state.user_id).await?);
+    .effort(analyzer_effort(state, &resolved).await?);
 
     let text = analyzer_chat(state, resolved, &req, " while structuring the text layer").await?;
     if text.trim().is_empty() {
@@ -914,7 +946,6 @@ async fn analyze_native_document(
     bytes: &[u8],
 ) -> AppResult<(String, Option<String>)> {
     use crate::llm::{ChatRequest, ContentPart, Message, Role, part_for_file};
-    use crate::models;
 
     let req = ChatRequest::new(
         &resolved.model.model_id,
@@ -939,7 +970,7 @@ async fn analyze_native_document(
          nothing else.",
     )
     .max_tokens(resolved.model.max_output_tokens.max(1024) as u32)
-    .effort(models::effort(&state.db, &state.user_id).await?);
+    .effort(analyzer_effort(state, &resolved).await?);
 
     let text = analyzer_chat(state, resolved, &req, " while reading the PDF document")
         .await
@@ -980,7 +1011,7 @@ async fn analyze_pdf(
     }
 
     let filename = source.original_filename.as_deref().unwrap_or(&source.title);
-    let extracted = extract_pdf_text(&bytes);
+    let extracted = pdf_text(&bytes).await;
     let has_text = usable_text_layer(&extracted);
 
     let resolved = match analyzer_model(state, model_override).await? {
@@ -1091,7 +1122,25 @@ fn honest_pdf_error(cause: &AppError) -> AppError {
     ))
 }
 
-/// PDF text-layer extraction: FlateDecode and ASCII85/ASCIIHex streams are
+/// The PDF's own text. Read through its fonts first (`render::extract_text`),
+/// since that is the only way to decode most real PDFs; the raw string scan
+/// below is kept for files the interpreter cannot parse. Interpreting every
+/// page is real work, so it runs off the async threads.
+async fn pdf_text(bytes: &[u8]) -> String {
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let read = render::extract_text(&bytes);
+        if usable_text_layer(&read) {
+            return read;
+        }
+        let raw = extract_pdf_text(&bytes);
+        if usable_text_layer(&raw) { raw } else { read }
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Fallback text-layer extraction: FlateDecode and ASCII85/ASCIIHex streams are
 /// decoded, image streams (DCT, CCITT, JBIG2, JPX) are skipped, and literal
 /// `( ... )` plus hex `< ... >` strings are collected from everything
 /// textual. Raw compressed bytes are never scanned, so binary junk cannot
@@ -1441,7 +1490,6 @@ fn truncate_chars(s: &str, max: usize) -> (String, bool) {
 /// phase 2; usable directly today.
 pub async fn ask_source(state: &AppState, source: &Source, question: &str) -> AppResult<String> {
     use crate::llm::{ChatRequest, ContentPart, Message, Role, part_for_file};
-    use crate::models;
 
     let resolved = state.role_model("analyzer").await?;
     if !resolved.model.supports_vision && !matches!(kind_of(source), Kind::Text) {
@@ -1471,7 +1519,7 @@ pub async fn ask_source(state: &AppState, source: &Source, question: &str) -> Ap
              the question, say so plainly.",
     )
     .max_tokens(resolved.model.max_output_tokens.max(1024) as u32)
-    .effort(models::effort(&state.db, &state.user_id).await?);
+    .effort(analyzer_effort(state, &resolved).await?);
 
     let client = resolved.client(&state.http)?;
     match crate::llm::chat_with_retry(client.as_ref(), &req).await {
@@ -1486,7 +1534,7 @@ pub async fn ask_source(state: &AppState, source: &Source, question: &str) -> Ap
         // take images but not files). For a PDF with a usable text layer,
         // answer from that instead of failing.
         Err(_) if matches!(kind, Kind::Pdf) => {
-            let extracted = extract_pdf_text(&bytes);
+            let extracted = pdf_text(&bytes).await;
             if !usable_text_layer(&extracted) {
                 return Err(AppError::Unsupported(
                     "the analyzer endpoint rejected this PDF and it has no \
@@ -1509,7 +1557,7 @@ pub async fn ask_source(state: &AppState, source: &Source, question: &str) -> Ap
                  text, in markdown with LaTeX for any mathematics.",
             )
             .max_tokens(resolved.model.max_output_tokens.max(1024) as u32)
-            .effort(models::effort(&state.db, &state.user_id).await?);
+            .effort(analyzer_effort(state, &resolved).await?);
             analyzer_chat(state, &resolved, &fallback, " while reading this source").await
         }
         Err(e) => Err(e.into()),
