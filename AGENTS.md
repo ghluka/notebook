@@ -77,6 +77,7 @@ src/
   storage.rs           content-addressed file store (uploads/)
   db.rs                pool setup, migrations, row structs
   models.rs            registry: users, providers, models, role assignments
+  base.rs              the URL prefix when a proxy serves this from a subdirectory
   analyzer/            ingestion: bytes → markdown-latex → chunks
     mod.rs             dispatch on source kind
     text.rs            no-LLM path for text/markdown (works today)
@@ -666,6 +667,7 @@ configured in the UI wins.
 | `DATABASE_URL` | `sqlite://data.db` | SQLite file (created if missing) |
 | `UPLOAD_DIR` | `uploads` | content-addressed file store |
 | `MAX_UPLOAD_BYTES` | `268435456` | 256 MiB request-body cap |
+| `BASE_PATH` | none | URL prefix when a reverse proxy serves this from a subdirectory, such as `/notebook` |
 
 Seed-only (used once, against an empty database):
 
@@ -679,3 +681,39 @@ Seed-only (used once, against an empty database):
 Note that `dotenvy` does not override variables already exported in your shell.
 if a provider looks wrong at first boot, check the real environment before the
 `.env`.
+
+### Behind a reverse proxy
+
+Every route here is written against the site root, so a proxy that serves the app
+from a subdirectory has to be told about. `BASE_PATH` names that prefix.
+
+```nginx
+location /notebook/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 3600s;        # an analysis is minutes of model calls
+    client_max_body_size 256m;       # nginx's own cap is 1m, under MAX_UPLOAD_BYTES
+}
+location = /notebook { return 308 /notebook/; }
+```
+
+- **`BASE_PATH=/notebook` works with either proxy style**: one that passes the
+  prefix through (`proxy_pass http://127.0.0.1:8080;`) and one that strips it
+  (`proxy_pass http://127.0.0.1:8080/;`). The router mounts the same table at
+  the root and under the prefix, and the prefix is put back on every URL the app
+  emits, so the redirect that sends an anonymous browser to the login page, the
+  session cookie's `Path` and the client's own fetches all stay inside the
+  subdirectory.
+- **A proxy may declare the prefix instead**, with `X-Forwarded-Prefix:
+  /notebook`, honoured when `BASE_PATH` is unset. That only works with the
+  stripping style, since the router is built once at startup and cannot mount a
+  prefix it only learns about per request.
+- **The client learns the prefix from the page.** Each entry point carries a
+  `__BASE_PATH__` placeholder in `<head>` that `routes::pages` fills in, and
+  everything in `static/` builds its URLs as `BASE + '/api/...'`. Nothing there
+  may hard code a leading `/`, or the subdirectory deployment breaks in a way
+  the server cannot see.
+- **The mount point without its trailing slash redirects to the one with it**,
+  which is the spelling the client uses, rather than answering 401 through the
+  gate and sending people looking for a login page that was already there.

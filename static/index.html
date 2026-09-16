@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>notebook</title>
+<!-- Where this app is mounted, filled in by the server: empty at the site
+     root, "/notebook" when a reverse proxy serves it from a subdirectory.
+     Every URL below is built from it. -->
+<script>window.__BASE__ = "__BASE_PATH__";</script>
 <style>
   :root {
     color-scheme: dark;
@@ -476,6 +480,34 @@
   .hint.bad { color:var(--bad); }
   h2.section { font-size:11px; text-transform:uppercase; color:var(--faint);
                letter-spacing:.09em; margin:24px 0 8px; }
+  /* ------------------------------------------------------ settings */
+  .settings-wrap { display:flex; min-height:0; flex:1; }
+  .settings-rail { width:214px; flex:none; border-right:1px solid var(--line);
+                   padding:12px 8px; overflow:auto; }
+  .settings-search { display:flex; align-items:center; gap:7px; background:var(--bg);
+                     border:1px solid var(--line); border-radius:8px; padding:7px 10px;
+                     margin:0 4px 8px; color:var(--faint); }
+  .settings-search input { flex:1; min-width:0; background:transparent; border:0;
+                           outline:none; color:var(--fg); font:inherit; font-size:13px;
+                           padding:0; }
+  .settings-group { font-size:11px; color:var(--faint); padding:10px 10px 2px; }
+  .settings-tab { display:flex; align-items:center; gap:10px; width:100%;
+                  background:transparent; border:0; color:var(--dim); padding:8px 10px;
+                  border-radius:8px; font-size:13px; text-align:left; }
+  .settings-tab:hover { background:var(--hover); }
+  .settings-tab.on { background:var(--raised); color:var(--fg); }
+  .settings-tab svg { flex:none; color:var(--faint); }
+  .settings-tab.on svg { color:var(--fg); }
+  .settings-body { flex:1; min-width:0; }
+  .settings-body h2.section:first-child { margin-top:14px; }
+  .setting input[type=password] { width:250px; flex:none; }
+  .pw-form { display:flex; flex-direction:column; gap:8px; padding:11px 0;
+             border-bottom:1px solid #2e2d2b; }
+  .pw-form .row3 { display:flex; gap:8px; }
+  .pw-form input { flex:1; min-width:0; }
+  .pw-msg { font-size:12px; min-height:18px; }
+  .pw-msg.bad { color:var(--bad); }
+  .pw-msg.ok { color:var(--ok); }
 </style>
 </head>
 <body>
@@ -711,43 +743,32 @@
 
 <!-- ------------------------------------------------------ settings ---- -->
 <div class="modal" id="settings" hidden>
-  <div class="sheet" style="width:min(600px,100%)">
+  <div class="sheet" style="width:min(780px,100%)">
     <header><b>Settings</b><span class="spacer"></span>
       <button class="btn ghost" id="closeSettings">Close</button></header>
-    <div class="scroll">
-      <h2 class="section" style="margin-top:14px">Models</h2>
-      <div class="setting">
-        <div><b>Researcher</b><div class="hint">Answers your questions by searching and reading sources.</div></div>
-        <select id="setResearcher"></select>
+    <div class="settings-wrap">
+      <div class="settings-rail">
+        <div class="settings-search">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="7" cy="7" r="4.2"/><path d="M10.3 10.3L14 14"/>
+          </svg>
+          <input type="text" id="settingsSearch" placeholder="Search" autocomplete="off">
+        </div>
+        <div class="settings-tabs" id="settingsTabs"></div>
       </div>
-      <div class="setting">
-        <div><b>Analyzer</b><div class="hint">Reads each upload once. Only models that can see are offered.</div></div>
-        <select id="setAnalyzer"></select>
-      </div>
-      <div class="setting">
-        <div><b>Thinking effort</b><div class="hint">How long the researcher may reason before it answers.</div></div>
-        <select id="setEffort"></select>
-      </div>
-      <div class="setting">
-        <div><b>Providers and models</b><div class="hint">Connect endpoints, pin models to the picker, fix capability tags.</div></div>
-        <button class="btn ghost" id="openConfigureBtn">Configure</button>
-      </div>
-      <h2 class="section">Vault</h2>
-      <div class="setting">
-        <div><b id="setVaultName"></b><div class="hint" id="setVaultCounts"></div></div>
-        <button class="btn ghost" id="setManageVaults">Manage vaults</button>
-      </div>
+      <div class="scroll settings-body" id="settingsBody"></div>
     </div>
   </div>
 </div>
 
 <script>
 const $ = s => document.querySelector(s);
+const BASE = window.__BASE__ || '';
 const state = {
   sources: [], folders: [], open: new Set(), selected: new Set(), attached: [],
   selectedNode: null, conversationId: null, viewerSource: null, viewerTab: 'rendition',
   settings: { pinned: [], researcher: null, thinking_effort: 'off' },
-  activeModel: null, context: { used: 0, window: 0 },
+  activeModel: null, context: { used: 0, window: 0 }, settingsTab: 'general',
   models: [], providers: [], roles: {}, editingProvider: null, dropTarget: null,
   chats: [], cmdIndex: 0, vaults: [], vault: null,
   uploading: 0, analysisTotal: 0, analysisTimer: null,
@@ -760,9 +781,14 @@ async function api(path, opts = {}) {
     opts.headers = { 'content-type': 'application/json' };
     delete opts.json;
   }
-  const r = await fetch(path, opts);
+  const r = await fetch(BASE + path, opts);
   const body = await r.json().catch(() => ({ error: r.statusText }));
   if (!r.ok) {
+    // No session means someone else's browser, an expired cookie or a fresh
+    // profile: the login page is the only thing left to see.
+    if (r.status === 401 && !location.pathname.startsWith(BASE + '/login')) {
+      location.href = BASE + '/login';
+    }
     const error = new Error(body.error || r.statusText);
     // The server labels failures it expects the client to act on, such as
     // `kind: "rate_limited"`, which carries the model that ran out of capacity.
@@ -1612,7 +1638,7 @@ async function renderViewer() {
 
   const body = $('#viewerBody');
   body.innerHTML = '';
-  const raw = '/api/sources/' + source.id + '/raw';
+  const raw = BASE + '/api/sources/' + source.id + '/raw';
 
   if (state.viewerTab === 'original') {
     if (source.kind === 'image') {
@@ -3104,7 +3130,7 @@ async function runTurn(text, files = []) {
   };
 
   try {
-    const r = await fetch('/api/chat/stream', {
+    const r = await fetch(BASE + '/api/chat/stream', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -3243,14 +3269,20 @@ const LAST_CHAT_KEY = 'notebook.conversation';
 const lastChatKey = () => LAST_CHAT_KEY + (state.vault ? '.' + state.vault.id : '');
 
 /* The address bar is the permalink: /c/<id> for a conversation, / for a fresh
-   one. History entries mean back and forward walk the conversations too. */
+   one. History entries mean back and forward walk the conversations too. The
+   path the browser shows carries the deployment's prefix; the routes do not. */
+function appPath() {
+  const path = location.pathname;
+  return (BASE && path.startsWith(BASE)) ? path.slice(BASE.length) || '/' : path;
+}
+
 function conversationFromUrl() {
-  const m = location.pathname.match(/^\/c\/([\w-]+)$/);
+  const m = appPath().match(/^\/c\/([\w-]+)$/);
   return m ? m[1] : null;
 }
 
 function setUrl(id, { replace = false } = {}) {
-  const path = id ? '/c/' + id : '/';
+  const path = BASE + (id ? '/c/' + id : '/');
   if (location.pathname === path) return;
   history[replace ? 'replaceState' : 'pushState']({ conversation: id }, '', path);
 }
@@ -3798,41 +3830,204 @@ async function moveFolderToVault(folder) {
 }
 
 /* ----------------------------------------------------------- settings */
-/* One place for what can be set. Models first, since they are what there is;
+/* One place for what can be set. Tabs on the left, content on the right;
    Configure stays the place for providers and the full model table. */
-$('#settingsBtn').onclick = openSettings;
+const SETTINGS_TABS = [
+  { id: 'general', label: 'General', group: 'Settings',
+    icon: '<path d="M2 5.5h12M2 10.5h12"/><circle cx="10.5" cy="5.5" r="1.7"/><circle cx="5.5" cy="10.5" r="1.7"/>' },
+  { id: 'account', label: 'Account', group: 'Settings',
+    icon: '<circle cx="8" cy="5.4" r="2.6"/><path d="M2.6 13.6c.7-2.7 2.8-4.1 5.4-4.1s4.7 1.4 5.4 4.1"/>' },
+  { id: 'vault', label: 'Vault', group: 'Library',
+    icon: '<rect x="2.4" y="3" width="11.2" height="10" rx="1"/><path d="M2.4 6h11.2M6.4 8.8h3.2"/>' },
+];
+$('#settingsBtn').onclick = () => openSettings('general');
 $('#closeSettings').onclick = () => { $('#settings').hidden = true; };
 $('#settings').onclick = e => { if (e.target.id === 'settings') e.target.hidden = true; };
-$('#openConfigureBtn').onclick = () => { $('#settings').hidden = true; openConfigure(); };
-$('#setManageVaults').onclick = () => { $('#settings').hidden = true; openVaultManager(); };
-$('#setResearcher').onchange = e => saveSetting({ researcher_model: e.target.value });
-$('#setAnalyzer').onchange = e => saveSetting({ analyzer_model: e.target.value });
-$('#setEffort').onchange = e => saveSetting({ thinking_effort: e.target.value });
+$('#settingsSearch').oninput = e => renderSettingsTabs(e.target.value);
 
-async function openSettings() {
+async function openSettings(tab) {
+  if (tab) state.settingsTab = tab;
   $('#settings').hidden = false;
+  $('#settingsSearch').value = '';
+  renderSettingsTabs('');
   await renderSettings();
 }
 
+function renderSettingsTabs(filter) {
+  const q = (filter || '').trim().toLowerCase();
+  const box = $('#settingsTabs');
+  box.innerHTML = '';
+  let lastGroup = null;
+  for (const t of SETTINGS_TABS) {
+    if (q && !t.label.toLowerCase().includes(q)) continue;
+    if (t.group !== lastGroup) {
+      lastGroup = t.group;
+      const g = document.createElement('div');
+      g.className = 'settings-group';
+      g.textContent = t.group;
+      box.append(g);
+    }
+    const b = document.createElement('button');
+    b.className = 'settings-tab' + (state.settingsTab === t.id ? ' on' : '');
+    b.innerHTML = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none"
+      stroke="currentColor" stroke-width="1.4" stroke-linecap="round">${t.icon}</svg>
+      <span>${t.label}</span>`;
+    b.onclick = () => { state.settingsTab = t.id; renderSettingsTabs($('#settingsSearch').value); renderSettings(); };
+    box.append(b);
+  }
+  if (!box.children.length) {
+    const g = document.createElement('div');
+    g.className = 'settings-group';
+    g.textContent = 'No matching tabs';
+    box.append(g);
+  }
+}
+
 async function renderSettings() {
+  const tab = state.settingsTab || 'general';
+  const body = $('#settingsBody');
+  if (tab === 'account') return renderAccount(body);
+  if (tab === 'vault') return renderSettingsVault(body);
+  return renderGeneral(body);
+}
+
+async function renderGeneral(body) {
   const [{ models }, settings] = await Promise.all([api('/api/models'), api('/api/settings')]);
   state.settings = settings;
   // Pinned first, since those are the ones in use.
   const order = [...models].sort((a, b) => Number(b.pinned) - Number(a.pinned));
   const seeing = order.filter(m => m.supports_vision);
-  fillModelSelect($('#setResearcher'), order, settings.researcher);
-  fillModelSelect($('#setAnalyzer'), seeing.length ? seeing : order, settings.analyzer);
+  body.innerHTML = `
+    <h2 class="section" style="margin-top:14px">Models</h2>
+    <div class="setting">
+      <div><b>Researcher</b><div class="hint">Answers your questions by searching and reading sources.</div></div>
+      <select id="setResearcher"></select>
+    </div>
+    <div class="setting">
+      <div><b>Analyzer</b><div class="hint">Reads each upload once. Only models that can see are offered.</div></div>
+      <select id="setAnalyzer"></select>
+    </div>
+    <div class="setting">
+      <div><b>Thinking effort</b><div class="hint">How long the researcher may reason before it answers.</div></div>
+      <select id="setEffort"></select>
+    </div>
+    <div class="setting">
+      <div><b>Providers and models</b><div class="hint">Connect endpoints, pin models to the picker, fix capability tags.</div></div>
+      <button class="btn ghost" id="openConfigureBtn">Configure</button>
+    </div>`;
+  fillModelSelect(body.querySelector('#setResearcher'), order, settings.researcher);
+  fillModelSelect(body.querySelector('#setAnalyzer'), seeing.length ? seeing : order, settings.analyzer);
 
-  const effort = $('#setEffort');
-  effort.innerHTML = '';
+  const effort = body.querySelector('#setEffort');
   for (const [key, label, hint] of EFFORTS) effort.append(new Option(`${label}, ${hint}`, key));
   effort.value = settings.thinking_effort || 'off';
 
+  body.querySelector('#setResearcher').onchange = e => saveSetting({ researcher_model: e.target.value });
+  body.querySelector('#setAnalyzer').onchange = e => saveSetting({ analyzer_model: e.target.value });
+  body.querySelector('#setEffort').onchange = e => saveSetting({ thinking_effort: e.target.value });
+  body.querySelector('#openConfigureBtn').onclick = () => { $('#settings').hidden = true; openConfigure(); };
+}
+
+async function renderSettingsVault(body) {
   const vault = state.vaults.find(v => v.id === state.vault?.id);
-  $('#setVaultName').textContent = vault?.name || '';
-  $('#setVaultCounts').textContent = vault
-    ? `Open now, ${plural(vault.source_count, 'source')}, ${plural(vault.conversation_count, 'chat')}`
-    : '';
+  body.innerHTML = `
+    <h2 class="section" style="margin-top:14px">Vault</h2>
+    <div class="setting">
+      <div><b>${esc(vault?.name || '')}</b><div class="hint">${vault
+        ? `Open now, ${plural(vault.source_count, 'source')}, ${plural(vault.conversation_count, 'chat')}`
+        : ''}</div></div>
+      <button class="btn ghost" id="setManageVaults">Manage vaults</button>
+    </div>`;
+  body.querySelector('#setManageVaults').onclick = () => { $('#settings').hidden = true; openVaultManager(); };
+}
+
+async function renderAccount(body) {
+  body.innerHTML = `
+    <h2 class="section" style="margin-top:14px">Account</h2>
+    <div class="setting">
+      <div><b>Sign out this browser</b><div class="hint">Ends the session on this browser only.</div></div>
+      <button class="btn ghost" id="setLogout">Log out</button>
+    </div>
+    <div class="setting">
+      <div><b>Sign out everywhere</b><div class="hint">Ends every session, including this one.</div></div>
+      <button class="btn ghost" id="setLogoutAll">Log out all</button>
+    </div>
+    <h2 class="section">Password</h2>
+    <div class="pw-form">
+      <div class="row3">
+        <input type="password" id="pwCurrent" placeholder="Current password" autocomplete="current-password">
+      </div>
+      <div class="row3">
+        <input type="password" id="pwNew" placeholder="New password, at least 8 characters" autocomplete="new-password">
+        <input type="password" id="pwConfirm" placeholder="Repeat new password" autocomplete="new-password">
+      </div>
+      <div><button class="btn ghost" id="pwSave">Change password</button></div>
+      <div class="pw-msg" id="pwMsg"></div>
+    </div>
+    <h2 class="section">Active sessions</h2>
+    <div id="sessionRows"><div class="hint">Loading...</div></div>`;
+  body.querySelector('#setLogout').onclick = async () => {
+    await api('/api/auth/logout', { method: 'POST' });
+    location.href = BASE + '/login';
+  };
+  body.querySelector('#setLogoutAll').onclick = async () => {
+    if (!await ask('Sign out everywhere', 'Every browser signed into this library is signed out.', 'Sign out')) return;
+    await api('/api/auth/logout_all', { method: 'POST' });
+    location.href = BASE + '/login';
+  };
+  body.querySelector('#pwSave').onclick = async () => {
+    const msg = body.querySelector('#pwMsg');
+    const current = body.querySelector('#pwCurrent').value;
+    const next = body.querySelector('#pwNew').value;
+    const confirm = body.querySelector('#pwConfirm').value;
+    msg.className = 'pw-msg';
+    msg.textContent = '';
+    if (!current) { msg.className = 'pw-msg bad'; msg.textContent = 'Type the current password first.'; return; }
+    if (next.length < 8) { msg.className = 'pw-msg bad'; msg.textContent = 'The new password needs at least 8 characters.'; return; }
+    if (next !== confirm) { msg.className = 'pw-msg bad'; msg.textContent = 'The two new passwords do not match.'; return; }
+    try {
+      await api('/api/auth/password', { method: 'PATCH', json: { current, new: next } });
+      body.querySelector('#pwCurrent').value = '';
+      body.querySelector('#pwNew').value = '';
+      body.querySelector('#pwConfirm').value = '';
+      msg.className = 'pw-msg ok';
+      msg.textContent = 'Password changed. Other browsers were signed out.';
+    } catch (e) {
+      msg.className = 'pw-msg bad';
+      msg.textContent = e.message;
+    }
+  };
+  try {
+    const { sessions } = await api('/api/auth/sessions');
+    const rows = body.querySelector('#sessionRows');
+    if (!sessions.length) {
+      rows.innerHTML = '<div class="hint">No sessions.</div>';
+      return;
+    }
+    const table = document.createElement('table');
+    table.innerHTML = '<thead><tr><th>Device</th><th>Seen</th><th></th></tr></thead>';
+    const tb = document.createElement('tbody');
+    for (const s of sessions) {
+      const tr = document.createElement('tr');
+      const device = document.createElement('td');
+      const ua = (s.user_agent || '').slice(0, 80) || s.ip || 'unknown browser';
+      device.textContent = ua;
+      const seen = document.createElement('td');
+      seen.className = 'hint';
+      seen.textContent = ago(s.last_seen_at);
+      seen.title = new Date(s.last_seen_at).toLocaleString();
+      const mark = document.createElement('td');
+      mark.className = 'hint';
+      mark.textContent = s.current ? 'this browser' : '';
+      tr.append(device, seen, mark);
+      tb.append(tr);
+    }
+    table.append(tb);
+    rows.innerHTML = '';
+    rows.append(table);
+  } catch (e) {
+    body.querySelector('#sessionRows').innerHTML = `<div class="hint">Could not load sessions: ${esc(e.message)}</div>`;
+  }
 }
 
 /* The role's current model is always an option, even when it is hidden or
@@ -4186,6 +4381,13 @@ document.addEventListener('keydown', e => {
 });
 
 (async () => {
+  try {
+    const s = await api('/api/auth/status');
+    if (!s.authenticated) { location.href = BASE + '/login'; return; }
+  } catch (e) {
+    location.href = BASE + '/login';
+    return;
+  }
   await loadVaults();
   await loadTree();
   await loadSettings();

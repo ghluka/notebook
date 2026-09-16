@@ -26,6 +26,39 @@ A local endpoint needs no key at all: `http://127.0.0.1:1234/v1` for LM Studio,
 address, database and upload paths. API keys do not go in it. The one exception
 is seeding a headless install, documented in AGENTS.md section 10.
 
+## Behind a reverse proxy
+
+Serving this from a subdirectory, such as `https://example.com/notebook/`,
+needs one setting: `BASE_PATH` names the prefix, and everything else follows
+from it.
+
+```nginx
+location /notebook/ {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_read_timeout 3600s;      # an analysis is minutes of model calls
+    client_max_body_size 256m;     # nginx's own cap is 1m, below MAX_UPLOAD_BYTES
+}
+location = /notebook { return 308 /notebook/; }
+```
+
+```bash
+BASE_PATH=/notebook
+```
+
+Without it, the app answers at the root of whichever host it is reached on, so
+`/notebook/login` reaches the router as a path it does not know: an anonymous
+browser is refused with the JSON a failed API call gets, on the login page
+itself. With it, the routes answer under the prefix as well as at the root, the
+login redirect lands on `/notebook/login`, the session cookie is scoped to
+`/notebook`, and the page tells the client to fetch `/notebook/api/...`.
+
+Both `proxy_pass http://127.0.0.1:8080;` (which passes the prefix through) and
+`proxy_pass http://127.0.0.1:8080/;` (which strips it) work. A proxy that would
+rather declare the prefix itself can send `X-Forwarded-Prefix: /notebook`
+instead of setting `BASE_PATH`, which requires the stripping form.
+
 ## API
 
 | method | path | |

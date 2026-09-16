@@ -28,6 +28,10 @@ pub struct Config {
     pub database_url: String,
     pub upload_dir: PathBuf,
     pub max_upload_bytes: usize,
+    /// The URL prefix this is mounted under when a reverse proxy serves it from
+    /// a subdirectory, such as `/notebook`. Empty means the site root. See
+    /// `crate::base`.
+    pub base_path: String,
 
     pub anthropic_api_key: String,
     pub anthropic_base_url: String,
@@ -53,6 +57,7 @@ impl Config {
             max_upload_bytes: var("MAX_UPLOAD_BYTES", "268435456")
                 .parse()
                 .unwrap_or(256 * 1024 * 1024),
+            base_path: crate::base::normalize(&var("BASE_PATH", "")),
 
             anthropic_api_key: var("ANTHROPIC_API_KEY", ""),
             anthropic_base_url: var("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),

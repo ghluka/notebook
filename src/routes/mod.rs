@@ -1,20 +1,24 @@
+pub mod auth;
 pub mod chat;
 pub mod conversations;
 pub mod health;
 pub mod models;
+pub mod pages;
 pub mod sources;
 pub mod vaults;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
-use axum::routing::{get, get_service, patch, post};
-use tower_http::services::{ServeDir, ServeFile};
+use axum::middleware;
+use axum::routing::{get, patch, post};
+use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
 pub fn router(state: AppState) -> Router {
     let max_upload = state.config.max_upload_bytes;
+    let base = state.config.base_path.clone();
 
     let api = Router::new()
         .route("/health", get(health::health))
@@ -57,15 +61,56 @@ pub fn router(state: AppState) -> Router {
         .route("/models", get(models::list_models).post(models::add_model))
         .route("/models/{id}", patch(models::update_model).delete(models::delete_model))
         .route("/settings", get(models::get_settings).patch(models::patch_settings))
+        .route("/auth/status", get(auth::status))
+        .route("/auth/challenge", post(auth::challenge))
+        .route("/auth/login", post(auth::login))
+        .route("/auth/setup", post(auth::setup))
+        .route("/auth/logout", post(auth::logout))
+        .route("/auth/logout_all", post(auth::logout_all))
+        .route("/auth/password", patch(auth::change_password))
+        .route("/auth/sessions", get(auth::sessions))
         .layer(DefaultBodyLimit::max(max_upload));
 
-    Router::new()
+    let app = Router::new()
         .nest("/api", api)
+        // The pages a browser may be handed. They are served through a handler
+        // rather than `ServeDir` so the deployment's base path is written into
+        // them: behind a proxy at `/notebook`, the client has to ask for
+        // `/notebook/api/...`, and only the server knows that.
+        .route("/login", get(pages::login))
+        .route("/login.html", get(pages::login))
+        .route("/", get(pages::index))
+        .route("/index.html", get(pages::index))
         .route("/health", get(health::health))
         // Conversation permalinks. The client reads the id out of the path, so
         // every one of these serves the same page.
-        .route("/c/{id}", get_service(ServeFile::new("static/index.html")))
-        .fallback_service(ServeDir::new("static").append_index_html_on_directories(true))
+        .route("/c/{id}", get(pages::index))
+        .layer(middleware::from_fn_with_state(state.clone(), crate::auth::require_auth))
         .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .with_state(state.clone());
+
+    // Everything the table does not match is a static file, and it sits behind
+    // the same gate, so an unknown path answers 401 to an anonymous caller
+    // rather than 404 and existence never leaks. It is installed once, on the
+    // outside, so it covers the root and a mounted prefix alike.
+    let files = Router::new()
+        .fallback_service(ServeDir::new("static").append_index_html_on_directories(true))
+        .layer(middleware::from_fn_with_state(state.clone(), crate::auth::require_auth))
+        .with_state(state.clone());
+
+    if base.is_empty() {
+        return app.fallback_service(files);
+    }
+
+    // Mounted under a prefix, the table answers at both spellings: the root,
+    // which is what a proxy that strips the prefix forwards, and the mount
+    // point, which is what one that passes it through forwards. A request is
+    // only ever one or the other, so nothing is ambiguous. The mount point is
+    // the version with the trailing slash, since that is what a browser types
+    // and what a `location /notebook/` matches, so the bare one redirects to it
+    // rather than leaving the app's own root unreachable.
+    app.clone()
+        .nest(&format!("{base}/"), app)
+        .route(&base, get(pages::mount_point).with_state(state.clone()))
+        .fallback_service(files)
 }

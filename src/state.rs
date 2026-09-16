@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::auth::AuthState;
 use crate::config::Config;
 use crate::db::Db;
 use crate::error::{AppError, AppResult};
@@ -18,9 +19,13 @@ pub struct Inner {
     pub http: reqwest::Client,
     pub config: Config,
     /// Whose providers, keys and settings this request acts on. There is no
-    /// registration yet, so it is always the seeded local user; when auth
-    /// lands, this is what a session middleware fills in per request.
+    /// registration yet, so it is always the seeded local user; the password
+    /// gate proves the browser belongs to that user, and a session middleware
+    /// enforces it before any handler runs.
     pub user_id: String,
+    /// Proof of work challenges and login rate buckets. In memory, since both
+    /// expire in minutes.
+    pub auth: AuthState,
     /// One analysis at a time, process wide. Analyzing a dropped folder in
     /// parallel is the fastest way to get rate limited by your own provider.
     pub analysis: Arc<tokio::sync::Semaphore>,
@@ -38,6 +43,7 @@ impl AppState {
             http,
             config,
             user_id,
+            auth: AuthState::default(),
             analysis: Arc::new(tokio::sync::Semaphore::new(1)),
         }))
     }

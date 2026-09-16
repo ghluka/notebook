@@ -11,6 +11,8 @@ pub type AppResult<T> = Result<T, AppError>;
 pub enum AppError {
     #[error("{0}")]
     BadRequest(String),
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
     #[error("{0} not found")]
     NotFound(String),
     #[error("unsupported: {0}")]
@@ -55,6 +57,10 @@ impl AppError {
     /// apart from an ordinary failure without parsing prose.
     pub fn payload(&self) -> serde_json::Value {
         match self {
+            AppError::Unauthorized(message) => json!({
+                "error": message,
+                "kind": "unauthorized",
+            }),
             AppError::RateLimited { message, model_id, model_name, waited } => json!({
                 "error": message,
                 "kind": "rate_limited",
@@ -122,6 +128,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match &self {
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::Unsupported(_)
             | AppError::Rendition(_)

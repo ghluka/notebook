@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>notebook, sign in</title>
+<!-- Where this app is mounted, filled in by the server: empty at the site
+     root, "/notebook" when a reverse proxy serves it from a subdirectory.
+     Every URL below is built from it. -->
+<script>window.__BASE__ = "__BASE_PATH__";</script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg:#262624; --panel:#1f1e1d; --raised:#30302e; --hover:#333331;
+    --line:#3a3937; --fg:#faf9f5; --dim:#b8b5ad; --faint:#82807a;
+    --accent:#d97757; --bad:#e07a6a; --ok:#8fae7a;
+    --sans:ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono:ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+    background:var(--bg); color:var(--fg); font:14px/1.55 var(--sans); padding:24px;
+  }
+  .card {
+    width:min(400px, 100%); background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:28px 28px 24px;
+  }
+  h1 { font-size:20px; margin:0 0 4px; letter-spacing:-.01em; }
+  .sub { color:var(--dim); font-size:13px; margin:0 0 20px; }
+  label { display:block; font-size:12px; color:var(--faint); margin:0 0 6px; }
+  input[type=password] {
+    width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--line);
+    border-radius:8px; padding:10px 12px; font:inherit; outline:none; margin-bottom:14px;
+  }
+  input[type=password]:focus { border-color:var(--accent); }
+  button {
+    width:100%; background:var(--accent); color:#241a15; border:0; border-radius:8px;
+    padding:10px 12px; font:inherit; font-weight:600; cursor:pointer;
+  }
+  button:disabled { opacity:.55; cursor:default; }
+  .note { color:var(--faint); font-size:12px; margin:14px 0 0; text-align:center; }
+  .err { color:var(--bad); font-size:13px; margin:0 0 12px; min-height:20px; }
+  .work { color:var(--faint); font-size:12px; font-family:var(--mono); margin:0 0 12px;
+          min-height:18px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="title">Sign in</h1>
+  <p class="sub" id="subtitle">Your library is locked on this server.</p>
+  <p class="err" id="err"></p>
+  <label for="pw" id="pwLabel">Password</label>
+  <input type="password" id="pw" autocomplete="current-password" autofocus>
+  <p class="work" id="work"></p>
+  <button id="go">Sign in</button>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const BASE = window.__BASE__ || '';
+let mode = 'login';
+
+/* Synchronous SHA256 over ASCII, so the proof of work needs no library and
+   no async hashing overhead. Nonce and solution are ASCII by construction. */
+function sha256Ascii(str) {
+  const K = [
+    0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  const H = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const bytes = [];
+  for (let i = 0; i < str.length; i++) bytes.push(str.charCodeAt(i) & 0xff);
+  const bitLen = str.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  const hi = Math.floor(bitLen / 0x100000000), lo = bitLen >>> 0;
+  bytes.push((hi >>> 24) & 255, (hi >>> 16) & 255, (hi >>> 8) & 255, hi & 255,
+             (lo >>> 24) & 255, (lo >>> 16) & 255, (lo >>> 8) & 255, lo & 255);
+  const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  const w = new Array(64);
+  for (let b = 0; b < bytes.length; b += 64) {
+    for (let t = 0; t < 16; t++)
+      w[t] = (bytes[b + t * 4] << 24) | (bytes[b + t * 4 + 1] << 16) |
+             (bytes[b + t * 4 + 2] << 8) | bytes[b + t * 4 + 3];
+    for (let t = 16; t < 64; t++) {
+      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;
+    }
+    let a = H[0], b2 = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+    for (let t = 0; t < 64; t++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const ch = (e & f) ^ (~e & g);
+      const t1 = (h + S1 + ch + K[t] + w[t]) | 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b2) ^ (a & c) ^ (b2 & c);
+      const t2 = (S0 + maj) | 0;
+      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b2; b2 = a; a = (t1 + t2) | 0;
+    }
+    H[0] = (H[0] + a) | 0; H[1] = (H[1] + b2) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0;
+    H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+  }
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 8; i++) {
+    out[i * 4] = (H[i] >>> 24) & 255; out[i * 4 + 1] = (H[i] >>> 16) & 255;
+    out[i * 4 + 2] = (H[i] >>> 8) & 255; out[i * 4 + 3] = H[i] & 255;
+  }
+  return out;
+}
+
+function leadingZeroBits(digest) {
+  let n = 0;
+  for (const b of digest) {
+    if (b === 0) { n += 8; continue; }
+    let v = b;
+    while ((v & 0x80) === 0) { n++; v = (v << 1) & 0xff; }
+    break;
+  }
+  return n;
+}
+
+async function solve(nonce, difficulty, onProgress) {
+  let start = Math.floor(Math.random() * 100000);
+  for (let s = start; ; s++) {
+    const sol = String(s);
+    if (leadingZeroBits(sha256Ascii(nonce + sol)) >= difficulty) return sol;
+    if ((s - start) % 4096 === 0) {
+      onProgress(s - start);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+}
+
+async function json(path, opts = {}) {
+  if (opts.body !== undefined && typeof opts.body !== 'string') {
+    opts.body = JSON.stringify(opts.body);
+    opts.headers = { 'content-type': 'application/json' };
+  }
+  const r = await fetch(BASE + path, opts);
+  const body = await r.json().catch(() => ({ error: r.statusText }));
+  if (!r.ok) {
+    const e = new Error(body.error || r.statusText);
+    e.status = r.status;
+    e.body = body;
+    throw e;
+  }
+  return body;
+}
+
+async function submit() {
+  const pw = $('#pw').value;
+  if (!pw) { $('#err').textContent = 'Type your password first.'; return; }
+  if (mode === 'setup' && pw.length < 8) {
+    $('#err').textContent = 'Pick at least 8 characters.';
+    return;
+  }
+  $('#go').disabled = true;
+  $('#err').textContent = '';
+  try {
+    const { nonce, difficulty } = await json('/api/auth/challenge', { method: 'POST' });
+    $('#work').textContent = 'proving you are human...';
+    const solution = await solve(nonce, difficulty,
+      n => { $('#work').textContent = `proving you are human... ${Math.round(n / 1000)}k hashes`; });
+    $('#work').textContent = '';
+    await json('/api/auth/' + mode, { method: 'POST', body: { nonce, solution, password: pw } });
+    location.href = BASE + '/';
+  } catch (e) {
+    if (e.status === 429) {
+      const wait = e.body.retry_after || 60;
+      $('#err').textContent = `Too many attempts. Wait ${wait}s and try again.`;
+    } else {
+      $('#err').textContent = e.message;
+    }
+    $('#go').disabled = false;
+  }
+}
+
+$('#go').onclick = submit;
+$('#pw').addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+
+(async () => {
+  try {
+    const s = await json('/api/auth/status');
+    if (s.authenticated) { location.href = BASE + '/'; return; }
+    if (s.setup_required) {
+      mode = 'setup';
+      $('#title').textContent = 'Set a password';
+      $('#subtitle').textContent = 'First visit. This password locks the whole library on this server.';
+      $('#pwLabel').textContent = 'New password, at least 8 characters';
+      $('#pw').autocomplete = 'new-password';
+      $('#go').textContent = 'Set password';
+    }
+  } catch (e) {
+    $('#err').textContent = 'The server did not answer. Is it running?';
+  }
+})();
+</script>
+</body>
+</html>

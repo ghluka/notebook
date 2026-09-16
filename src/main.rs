@@ -1,6 +1,8 @@
 //! notebook: an agent harness over your own sources. See AGENTS.md.
 
 mod analyzer;
+mod auth;
+mod base;
 mod config;
 mod db;
 mod error;
@@ -33,6 +35,9 @@ async fn main() -> anyhow::Result<()> {
 
     let bind_addr = config.bind_addr.clone();
     let state = AppState::new(db, storage, config, user_id);
+    // A headless install can seed its login password once from the
+    // environment, the same way providers are seeded.
+    auth::seed_password_from_env(&state.db, &state.user_id).await;
     // Anything a previous run left mid-analysis picks up again here.
     analyzer::resume_pending(&state).await;
     let app = routes::router(state);
