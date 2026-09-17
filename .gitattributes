@@ -1,10 +1,6 @@
-# Auto detect text files and perform LF normalization
 * text=auto
 
-# Migrations are checksummed byte for byte by sqlx (sha384 over the file as it
-# is embedded at compile time), so git must never rewrite their line endings.
-# With core.autocrlf on, a checkout turns these into CRLF, the digest changes,
-# and the app refuses to start against a database migrated from the LF copy:
-# "migration 1 was previously applied but has been modified". -text keeps the
-# bytes exactly as committed, whatever the machine's git settings are.
+*.css linguist-vendored
+*.html linguist-vendored
+
 migrations/*.sql -text
