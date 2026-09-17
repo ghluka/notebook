@@ -1,157 +1,38 @@
-# notebook
+# 📚 notebook
 
-An agent harness over your own sources: upload documents, an **analyzer** model
-turns each one into an indexable markdown-latex rendition, and a **researcher**
-model answers questions over the index with citations back to the original.
+An agent harness over your own sources: upload documents; an analyzer model
+vectorizes each one into a database so a researcher can easily index sources
+and ask questions with citations. It answers only from your sources, so it
+knows only what you give it and avoids hallucinations. Supports vaults; you
+can isolate and organize each source so it stays on the topic of that vault.
 
-See [AGENTS.md](AGENTS.md) for the architecture and roadmap.
+![](https://luka.onl/f/62742f1581b4.png)
 
-## Run
+[📽️ Video demonstration - Calculus prompt](https://luka.onl/f/75d4491e0610.mp4) (data: two >700 page [textbooks](https://openstax.org/subjects/math#Calculus))
+
+
+## Running
+
+> [!WARNING]  
+> When you first run, you'll be asked to set a password. Do not expose the site
+> beyond locally until this has been done.
 
 ```bash
 cargo run
 ```
 
-Then open http://127.0.0.1:8080, click the model chip in the prompt bar and
-choose **Configure**, then add a provider: a base URL, an API style (Anthropic's
-`/v1/messages` or anything OpenAI-compatible) and your API key. The server reads
-that endpoint's own model list, and you hide the models you don't want and pin
-the ones you do. Keys are stored per user, server-side, and never returned to
-the browser.
-
-A local endpoint needs no key at all: `http://127.0.0.1:1234/v1` for LM Studio,
-`http://localhost:11434/v1` for Ollama.
+When you first run, make sure you do not publicly expose the site, as you'll want
+to set a password first.
+The default bind is localhost:8080, so open http://127.0.0.1:8080. Once it's set
+up, click the model chip in the prompt bar and choose **Configure**, then add a
+provider. Any API endpoint that supports the OpenAI-style responses or chat
+completions, or any endpoint that supports the Anthropic-style messages endpoint
+will work.
 
 `.env` (see `.env.example`) is optional and covers server settings only: bind
-address, database and upload paths. API keys do not go in it. The one exception
-is seeding a headless install, documented in AGENTS.md section 10.
+address, database and upload paths.
 
-## Behind a reverse proxy
+### Behind a reverse proxy
 
-Serving this from a subdirectory, such as `https://example.com/notebook/`,
-needs one setting: `BASE_PATH` names the prefix, and everything else follows
-from it.
-
-```nginx
-location /notebook/ {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_read_timeout 3600s;      # an analysis is minutes of model calls
-    client_max_body_size 256m;     # nginx's own cap is 1m, below MAX_UPLOAD_BYTES
-}
-location = /notebook { return 308 /notebook/; }
-```
-
-```bash
-BASE_PATH=/notebook
-```
-
-Without it, the app answers at the root of whichever host it is reached on, so
-`/notebook/login` reaches the router as a path it does not know: an anonymous
-browser is refused with the JSON a failed API call gets, on the login page
-itself. With it, the routes answer under the prefix as well as at the root, the
-login redirect lands on `/notebook/login`, the session cookie is scoped to
-`/notebook`, and the page tells the client to fetch `/notebook/api/...`.
-
-Both `proxy_pass http://127.0.0.1:8080;` (which passes the prefix through) and
-`proxy_pass http://127.0.0.1:8080/;` (which strips it) work. A proxy that would
-rather declare the prefix itself can send `X-Forwarded-Prefix: /notebook`
-instead of setting `BASE_PATH`, which requires the stripping form.
-
-## API
-
-| method | path | |
-|---|---|---|
-| GET | `/api/health` | roles, providers, key presence, no secrets |
-| GET | `/api/me` | the current user (one local user until auth exists) |
-| POST | `/api/sources` | multipart, one or many `file` parts, optional `title` and `folder_id` |
-| GET | `/api/sources` | library listing |
-| GET | `/api/sources/{id}` | one source |
-| PATCH | `/api/sources/{id}` | rename, or move between folders |
-| GET | `/api/sources/{id}/raw` | the original bytes, served inline |
-| POST | `/api/folders` | create a folder |
-| PATCH/DELETE | `/api/folders/{id}` | rename or move / delete, leaving files at the root |
-| DELETE | `/api/sources/{id}` | drops rows; blob goes when unreferenced |
-| GET | `/api/sources/{id}/document` | markdown-latex rendition + chunks |
-| POST | `/api/sources/{id}/reingest` | re-run the analyzer over stored bytes; optional `{"model_id"}` runs it on another model |
-| POST | `/api/sources/{id}/ask` | `{"question": "..."}` to the analyzer, on the ORIGINAL file |
-| GET | `/api/search?q=` | FTS5 over chunks (`source_id`, `limit` optional) |
-| GET | `/c/{id}` | permalink; serves the app, which opens that conversation |
-| GET | `/api/conversations` | the sidebar list, newest first |
-| GET | `/api/conversations/{id}` | full transcript, compacted turns included |
-| PATCH/DELETE | `/api/conversations/{id}` | rename / delete |
-| POST | `/api/conversations/{id}/compact` | fold the transcript into a summary and clear the context |
-| POST | `/api/chat` | `{"message", "conversation_id"?, "source_ids"?, "model_id"?, "effort"?}`; closing the connection cancels the provider call |
-| GET | `/api/providers/presets` | the "Add Provider" menu |
-| GET/POST | `/api/providers` | list / connect a provider (import runs on create) |
-| PATCH/DELETE | `/api/providers/{id}` | edit name, URL or key / disconnect |
-| POST | `/api/providers/{id}/refresh` | re-read the endpoint's catalogue |
-| GET | `/api/models` | `?include_hidden=`, `?provider_id=` |
-| POST | `/api/models` | add a model the endpoint doesn't advertise |
-| PATCH/DELETE | `/api/models/{id}` | pin, hide, edit capabilities / remove |
-| GET/PATCH | `/api/settings` | role assignments + thinking effort |
-
-## Uploading
-
-Files are stored the moment you drop them and appear in the explorer straight
-away, greyed with a spinner while the analyzer works through them one at a time.
-The footer counts the queue down. Analysis runs on the server, so refreshing the
-page or closing the tab does not cancel it, and a restart picks up whatever was
-still queued.
-
-## How an answer is built
-
-A question runs a keyword search, and the researcher is handed whole passages
-with the ones either side of them, sized to the model's context window rather
-than trimmed to a few fragments. From there it can search again with better
-words, read a source around a line, or list what is in the notebook, until it
-can answer. Citations are the passages it used, one chip per file; clicking one
-opens that file at the line it drew on.
-
-## Narrowing a question
-
-By default a question searches every source. Drag files from the explorer into
-the conversation to search only those: they show as attachments above the
-composer and stay there until you remove them or switch conversations.
-
-## Models that are not listed
-
-Most endpoints report their catalogue and it is imported for you. Some do not:
-DeepSeek's Anthropic-style API lists nothing, and preview models are often
-missing from lists that exist. **Add model** in Configure takes the exact wire
-id and the capabilities, and every field of any model can be edited later,
-including the id.
-
-## When a provider is busy
-
-Rate limits are waited out automatically: 5 seconds, then a minute, then another
-minute, honouring any `Retry-After` the provider sends. If it is still refusing
-after that, the analyzer says so and offers to run the file on a different
-model, because that is a choice only you can make. A busy provider is never
-reported as an unreadable file, and it never falls back to another path that
-would call the same exhausted endpoint.
-
-## Conversations
-
-Everything you ask is saved against your user, so a reload puts you back in the
-same conversation. The rail lists them all; click one to reopen its transcript.
-
-When a conversation gets long, `/compact` in the composer summarises it: the
-turns stay readable with a divider marking the fold, but the next question
-carries the summary instead of the whole exchange, and the context meter drops
-back to zero.
-
-## Status
-
-Phase 0 of AGENTS.md is in place: server, storage, schema, both provider wire
-formats with tool-calling, multi-modal parts and reasoning effort, the per-user
-model registry behind the prompt bar, retrieval, and an end-to-end text/markdown
-ingestion path that needs no API key. Uploading a PDF, image, audio or video file
-stores the original and marks the source `failed` with "analyzer not implemented
-yet", which is phase 1.
-
-There is no registration: the server seeds one local user and treats it as the
-current one. Provider keys are stored in plaintext in SQLite, which is the same
-trust level as the `.env` they replace. Encrypt them before this runs anywhere
-multi-user.
+If you wish to serve this from a subdirectory, you can set the path in .env by
+setting the `BASE_PATH`.
