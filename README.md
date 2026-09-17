@@ -6,7 +6,7 @@ and ask questions with citations. It answers only from your sources, so it
 knows only what you give it and avoids hallucinations. Supports vaults; you
 can isolate and organize each source so it stays on the topic of that vault.
 
-![](https://luka.onl/f/62742f1581b4.png)
+<img src="https://luka.onl/f/62742f1581b4.png" width="510">
 
 [📽️ Video demonstration - Calculus prompt](https://luka.onl/f/75d4491e0610.mp4) (data: two >700 page [textbooks](https://openstax.org/subjects/math#Calculus))
 
