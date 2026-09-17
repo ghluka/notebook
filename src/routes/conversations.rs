@@ -1,5 +1,3 @@
-//! Saved conversations: list them, reopen one, rename, delete, compact, rewind.
-
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::Deserialize;
@@ -18,15 +16,13 @@ and anything still open. Keep every fact and citation that a later answer might 
 need, drop the phrasing and the pleasantries. Write it as notes for yourself, \
 not as a reply to anyone.";
 
-/// The open vault's conversations only.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let vault = db::active_vault(&state.db, &state.user_id).await?;
     let conversations = db::list_conversations(&state.db, &state.user_id, &vault.id).await?;
     Ok(Json(json!({ "conversations": conversations })))
 }
 
-/// `GET /api/conversations/{id}` returns the whole transcript, compacted turns
-/// included, because the history should still read in full after a compaction.
+// compacted turns included, so the history still reads in full after a compaction
 pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -34,7 +30,7 @@ pub async fn get(
     let conversation = load(&state, &id).await?;
     let messages = db::conversation_messages(&state.db, &conversation.id).await?;
 
-    // What the context meter should read on reopening: the last turn's usage.
+    // context meter reads the last assistant turn's usage
     let last_usage = messages
         .iter()
         .rev()
@@ -80,13 +76,7 @@ pub struct RewindBody {
     pub message_id: String,
 }
 
-/// `POST /api/conversations/{id}/rewind` takes a question back out of the
-/// transcript and hands it back to the caller, which then asks it again as it
-/// was (retry), asks a changed version of it (edit), or lets it go (undo). The
-/// message id can be either end of the exchange: an answer rewinds the question
-/// behind it, a question rewinds itself. Everything said after that point goes
-/// too, since a conversation is a line, not a tree, and leaving orphaned turns
-/// behind would make the history a lie.
+// accepts either end of the exchange; everything after the rewind point is removed
 pub async fn rewind(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -104,7 +94,6 @@ pub async fn rewind(
     Ok(Json(json!({
         "conversation_id": id,
         "message": question.content,
-        // The files it was asked about, so asking it again asks about them.
         "attachments": question
             .attachments
             .as_deref()
@@ -114,10 +103,7 @@ pub async fn rewind(
     })))
 }
 
-/// `POST /api/conversations/{id}/compact` folds the transcript into a summary
-/// and marks those turns compacted, so the next prompt carries the summary
-/// instead of the whole exchange. An already compacted conversation compacts
-/// again, summarising its previous summary along with what followed.
+// already compacted conversations fold their previous summary in too
 pub async fn compact(
     State(state): State<AppState>,
     Path(id): Path<String>,

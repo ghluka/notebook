@@ -1,15 +1,4 @@
-//! The model registry: users, their providers, and the models those providers
-//! report.
-//!
-//! This is the source of truth at runtime; the environment only seeds it on an
-//! empty database (see `bootstrap`). Everything the prompt bar and the Configure
-//! panel show comes from these tables.
-//!
-//! Ownership: every provider belongs to a user, and models and settings hang off
-//! providers. There is no registration yet, so `bootstrap` creates one local
-//! user and the server treats it as the current one; the queries already take an
-//! `owner` so adding real auth means changing where that string comes from, and
-//! nothing else.
+//! model registry: db is source of truth, env seeds an empty db once.
 
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -19,8 +8,6 @@ use crate::db::{Db, new_id, now};
 use crate::llm::{Effort, LlmError, LlmProvider, anthropic::AnthropicProvider, openai::OpenAiProvider};
 
 pub const LOCAL_USER: &str = "local";
-
-// ------------------------------------------------------------------- rows
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
@@ -36,7 +23,7 @@ pub struct Provider {
     pub name: String,
     pub api_style: String,
     pub base_url: String,
-    /// Never serialized. The API exposes `key_hint` instead.
+    /// never serialized; the api returns key_hint instead
     #[serde(skip_serializing)]
     pub api_key: String,
     pub created_at: String,
@@ -44,8 +31,6 @@ pub struct Provider {
 }
 
 impl Provider {
-    /// What the UI is allowed to see of a key: enough to recognise it, never
-    /// enough to use it.
     pub fn key_hint(&self) -> Option<String> {
         let k = self.api_key.trim();
         if k.is_empty() {
@@ -77,16 +62,13 @@ pub struct Model {
     pub created_at: String,
 }
 
-/// A model together with everything needed to call it.
 pub struct Resolved {
     pub model: Model,
     pub provider: Provider,
 }
 
 impl Resolved {
-    /// A remote endpoint with no stored key can only fail, and the provider's
-    /// own 401 is a poor explanation, so say what to fix instead. Loopback
-    /// endpoints are left alone: they legitimately take no key.
+    /// a remote endpoint with no key can only fail, so say what to fix; loopback takes none
     pub fn client(&self, http: &reqwest::Client) -> Result<Box<dyn LlmProvider>, LlmError> {
         if self.provider.api_key.is_empty() && !is_loopback(&self.provider.base_url) {
             return Err(LlmError::MissingKey(format!(
@@ -107,7 +89,6 @@ pub fn client_for(http: &reqwest::Client, p: &Provider) -> Box<dyn LlmProvider> 
     }
 }
 
-/// Whether a base URL points at this machine.
 pub fn is_loopback(base_url: &str) -> bool {
     let after_scheme = base_url.split("://").last().unwrap_or(base_url);
     let authority = after_scheme.split('/').next().unwrap_or_default();
@@ -133,8 +114,6 @@ mod tests {
     }
 }
 
-// ------------------------------------------------------------------ users
-
 pub async fn get_user(db: &Db, id: &str) -> sqlx::Result<Option<User>> {
     sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?1")
         .bind(id)
@@ -152,8 +131,6 @@ pub async fn ensure_user(db: &Db, id: &str, name: &str) -> sqlx::Result<User> {
     get_user(db, id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
-// -------------------------------------------------------------- providers
-
 pub async fn list_providers(db: &Db, owner: &str) -> sqlx::Result<Vec<Provider>> {
     sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE owner_id = ?1 ORDER BY created_at",
@@ -163,8 +140,7 @@ pub async fn list_providers(db: &Db, owner: &str) -> sqlx::Result<Vec<Provider>>
     .await
 }
 
-/// Scoped by owner on purpose: a provider id from another user must read as
-/// missing, not as forbidden.
+/// scoped by owner: another user's id must read as missing, not forbidden
 pub async fn get_provider(db: &Db, owner: &str, id: &str) -> sqlx::Result<Option<Provider>> {
     sqlx::query_as::<_, Provider>("SELECT * FROM providers WHERE id = ?1 AND owner_id = ?2")
         .bind(id)
@@ -200,8 +176,7 @@ pub async fn create_provider(
     get_provider(db, owner, &id).await?.ok_or(sqlx::Error::RowNotFound)
 }
 
-/// An absent `api_key` keeps the stored one, so the UI never has to round-trip
-/// a secret it cannot see.
+/// absent api_key keeps the stored one, so the ui never round-trips a secret
 pub async fn update_provider(
     db: &Db,
     owner: &str,
@@ -237,8 +212,6 @@ pub async fn delete_provider(db: &Db, owner: &str, id: &str) -> sqlx::Result<()>
         .await?;
     Ok(())
 }
-
-// ----------------------------------------------------------------- models
 
 pub async fn list_models(db: &Db, owner: &str) -> sqlx::Result<Vec<Model>> {
     sqlx::query_as::<_, Model>(
@@ -284,8 +257,6 @@ pub struct NewModel {
     pub pinned: Option<bool>,
 }
 
-/// Add a model the provider does not list (a fine-tune, a private deployment).
-/// Re-adding an existing id just refreshes its metadata.
 pub async fn add_model(db: &Db, m: NewModel, source: &str) -> sqlx::Result<Model> {
     let guess = Capabilities::guess(&m.model_id);
     upsert_model(
@@ -322,13 +293,11 @@ struct UpsertModel {
     supports_tools: bool,
     supports_thinking: bool,
     pinned: bool,
-    /// Applied on insert only. A re-import never re-hides what you unhid.
+    /// insert only; a re-import never re-hides what you unhid
     hidden: bool,
     source: String,
 }
 
-/// Insert or refresh one model row. A re-import updates the provider's facts
-/// but never touches the user's `hidden` / `pinned` choices.
 async fn upsert_model(db: &Db, provider_id: &str, m: &UpsertModel) -> sqlx::Result<()> {
     sqlx::query(
         "INSERT INTO models (id, provider_id, model_id, display_name, context_window,
@@ -367,9 +336,7 @@ async fn upsert_model(db: &Db, provider_id: &str, m: &UpsertModel) -> sqlx::Resu
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelPatch {
-    /// The id sent on the wire. Editable because endpoints that list nothing
-    /// (DeepSeek's Anthropic-style API among them) are typed in by hand, and a
-    /// typo should be fixable without losing the row's role and pin.
+    /// editable wire id: hand-typed endpoints need typos fixed without losing role and pin
     pub model_id: Option<String>,
     pub display_name: Option<String>,
     pub context_window: Option<i64>,
@@ -429,7 +396,6 @@ pub async fn delete_model(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
     .bind(owner)
     .execute(db)
     .await?;
-    // A deleted model must not stay assigned to a role.
     sqlx::query(
         "DELETE FROM settings
           WHERE owner_id = ?2 AND value = ?1
@@ -442,14 +408,10 @@ pub async fn delete_model(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Pull the provider's catalogue into the models table. Existing rows keep the
-/// user's hidden/pinned choices; ids the provider no longer reports are left in
-/// place with a stale `last_seen_at` rather than deleted, since a key without
-/// list access should never silently wipe a working configuration.
+/// stale ids stay with a stale last_seen_at; a key without list access must not wipe config
 pub struct ImportReport {
     pub total: usize,
     pub added: usize,
-    /// Non-chat models (embeddings, rerankers) imported hidden.
     pub non_chat: usize,
 }
 
@@ -499,8 +461,6 @@ pub async fn import_models(
     Ok(ImportReport { total: remote.len(), added, non_chat })
 }
 
-// --------------------------------------------------------------- settings
-
 pub async fn get_setting(db: &Db, owner: &str, key: &str) -> sqlx::Result<Option<String>> {
     Ok(sqlx::query("SELECT value FROM settings WHERE owner_id = ?1 AND key = ?2")
         .bind(owner)
@@ -532,8 +492,6 @@ pub async fn effort(db: &Db, owner: &str) -> sqlx::Result<Effort> {
         .unwrap_or(Effort::Off))
 }
 
-/// The model assigned to a role. Falls back to a pinned model, then to any
-/// visible one, so a fresh install with one provider just works.
 pub async fn resolve_role(db: &Db, owner: &str, role: &str) -> sqlx::Result<Option<Resolved>> {
     let assigned = get_setting(db, owner, &format!("{role}_model")).await?;
 
@@ -552,8 +510,7 @@ pub async fn resolve_role(db: &Db, owner: &str, role: &str) -> sqlx::Result<Opti
     Ok(Some(Resolved { model, provider }))
 }
 
-/// The analyzer needs to be able to look at images; the researcher does not.
-/// Pinned models win, then whatever is visible.
+/// the analyzer needs to see images, the researcher does not
 async fn fallback_model(db: &Db, owner: &str, role: &str) -> sqlx::Result<Option<Model>> {
     const ANY: &str = "SELECT m.* FROM models m
            JOIN providers p ON p.id = m.provider_id
@@ -578,10 +535,6 @@ pub async fn resolve_model_id(db: &Db, owner: &str, id: &str) -> sqlx::Result<Op
     Ok(Some(Resolved { model, provider }))
 }
 
-// -------------------------------------------------------------- catalogue
-
-/// Presets behind the "Add provider" menu. `api_style` decides the wire format;
-/// anything not Anthropic speaks OpenAI's.
 #[derive(Debug, Clone, Serialize)]
 pub struct Preset {
     pub key: &'static str,
@@ -611,8 +564,6 @@ pub const PRESETS: &[Preset] = &[
              base_url: "", needs_key: false },
 ];
 
-/// Defaults for an imported model, from its id. Wrong guesses are editable in
-/// the Configure panel; they only affect the context meter and role gating.
 pub struct Capabilities {
     pub context_window: i64,
     pub max_output_tokens: i64,
@@ -621,10 +572,7 @@ pub struct Capabilities {
     pub thinking: bool,
 }
 
-/// Substrings that mark a model as taking images. Used only when the endpoint
-/// says nothing itself, which is the case for bare OpenAI-style listings
-/// (NVIDIA, most proxies). It will be wrong sometimes; the Configure panel lets
-/// you toggle the flag by hand.
+/// last resort when the endpoint says nothing (bare openai listings); wrong sometimes, hand-editable
 const VISION_MARKERS: &[&str] = &[
     "vision", "-vl", "vl-", "vlm", "multimodal", "omni", "llava", "pixtral",
     "internvl", "minicpm-v", "idefics", "moondream", "smolvlm", "kosmos",
@@ -633,7 +581,6 @@ const VISION_MARKERS: &[&str] = &[
     "phi-4-multimodal", "llama-3.2-11b", "llama-3.2-90b", "llama-guard-4",
 ];
 
-/// Ids that are not chat models at all.
 const NON_CHAT_MARKERS: &[&str] = &[
     "embed", "rerank", "whisper", "tts", "dall-e", "moderation", "clip",
     "stable-diffusion", "guard", "safety", "reward", "detector",
@@ -714,8 +661,6 @@ impl Capabilities {
     }
 }
 
-// ------------------------------------------- listing a provider's models
-
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteModel {
     pub model_id: String,
@@ -724,17 +669,10 @@ pub struct RemoteModel {
     pub supports_vision: bool,
     pub supports_tools: bool,
     pub supports_thinking: bool,
-    /// False for embedding, reranking and other non-chat models. They are still
-    /// imported, but hidden, so they do not clutter the picker.
     pub is_chat: bool,
 }
 
-/// Ask the provider what it can serve.
-///
-/// The OpenAI-compatible `/models` listing is the lowest common denominator and
-/// often carries nothing but ids (LM Studio and NVIDIA both do this). When it
-/// tells us nothing about capabilities, try the server's own richer listing
-/// before falling back to guessing from the id.
+/// openai /models often carries ids only (lm studio, nvidia), so try the server's richer listing before guessing from the id
 pub async fn fetch_remote_models(
     http: &reqwest::Client,
     provider: &Provider,
@@ -755,8 +693,6 @@ pub async fn fetch_remote_models(
             if compat.iter().any(describes_capabilities) {
                 compat
             } else {
-                // LM Studio serves this alongside the compat API, with the real
-                // context length and whether the model takes images.
                 let native = format!("{}/api/v0/models", origin_of(&provider.base_url));
                 match data_array(get_with_key(http, &native, provider)).await {
                     Ok(rich) if rich.iter().any(describes_capabilities) => rich,
@@ -791,8 +727,7 @@ async fn data_array(req: reqwest::RequestBuilder) -> Result<Vec<serde_json::Valu
     Ok(v["data"].as_array().cloned().unwrap_or_default())
 }
 
-/// Strip the API path off a base URL so a server's non-OpenAI routes can be
-/// reached: `http://host:1234/v1` becomes `http://host:1234`.
+/// strip a trailing /v1 so the server's non-openai routes are reachable
 fn origin_of(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     match trimmed.rfind("/v1") {
@@ -801,7 +736,6 @@ fn origin_of(base_url: &str) -> String {
     }
 }
 
-/// Whether a listing entry says anything about the model beyond its name.
 fn describes_capabilities(m: &serde_json::Value) -> bool {
     !m["type"].is_null()
         || !m["capabilities"].is_null()
@@ -817,11 +751,7 @@ fn strings_at(m: &serde_json::Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Read one listing entry, preferring what the endpoint states over what the id
-/// suggests. Known shapes: LM Studio (`type`, `capabilities`,
-/// `max_context_length`), OpenRouter (`architecture.input_modalities`,
-/// `supported_parameters`, `context_length`), and bare OpenAI-style listings
-/// that carry nothing at all.
+/// endpoint fields beat id guessing: lm studio type/capabilities, openrouter architecture
 fn parse_remote(m: &serde_json::Value) -> Option<RemoteModel> {
     let id = m["id"].as_str()?.to_string();
     let guess = Capabilities::guess(&id);
@@ -839,7 +769,7 @@ fn parse_remote(m: &serde_json::Value) -> Option<RemoteModel> {
         || capabilities.iter().any(|c| c.contains("vision") || c.contains("image"))
         || (kind.is_empty() && modalities.is_empty() && guess.vision);
 
-    // An explicit capability list is exhaustive: absence means "no".
+    // an explicit capability list is exhaustive: absent means no
     let tools = if !capabilities.is_empty() {
         capabilities.iter().any(|c| c.contains("tool") || c.contains("function"))
     } else if !parameters.is_empty() {
@@ -880,15 +810,8 @@ fn parse_remote(m: &serde_json::Value) -> Option<RemoteModel> {
     })
 }
 
-// -------------------------------------------------------------- bootstrap
-
-/// Create the local user, and seed providers from the environment the first
-/// time the server runs against an empty database so an existing `.env` keeps
-/// working. Once a provider exists, the environment is ignored entirely.
 pub async fn bootstrap(db: &Db, cfg: &Config) -> anyhow::Result<String> {
     let user = ensure_user(db, LOCAL_USER, "Local").await?;
-    // Every upload lands in a vault, so a fresh database gets one, and anything
-    // the vaults migration could not place goes into it.
     let vault = crate::db::active_vault(db, &user.id).await?;
     crate::db::adopt_orphans(db, &user.id, &vault.id).await?;
 
@@ -929,8 +852,6 @@ pub async fn bootstrap(db: &Db, cfg: &Config) -> anyhow::Result<String> {
         return Ok(user.id);
     }
 
-    // The catalogue can only be imported once the server can reach the network,
-    // so seed the env-named models directly and let the user refresh later.
     for (role, kind, model_id) in [
         ("researcher", cfg.researcher_provider, &cfg.researcher_model),
         ("analyzer", cfg.analyzer_provider, &cfg.analyzer_model),

@@ -8,26 +8,18 @@ use crate::error::{AppError, AppResult};
 use crate::models::{self, Resolved};
 use crate::storage::Storage;
 
-/// Shared, cheap to clone. Every handler gets one of these.
 #[derive(Clone)]
 pub struct AppState(Arc<Inner>);
 
 pub struct Inner {
     pub db: Db,
     pub storage: Storage,
-    /// One connection pool for every provider call.
     pub http: reqwest::Client,
     pub config: Config,
-    /// Whose providers, keys and settings this request acts on. There is no
-    /// registration yet, so it is always the seeded local user; the password
-    /// gate proves the browser belongs to that user, and a session middleware
-    /// enforces it before any handler runs.
+    /// no registration yet, always the seeded local user; session middleware fills this in
     pub user_id: String,
-    /// Proof of work challenges and login rate buckets. In memory, since both
-    /// expire in minutes.
     pub auth: AuthState,
-    /// One analysis at a time, process wide. Analyzing a dropped folder in
-    /// parallel is the fastest way to get rate limited by your own provider.
+    /// one at a time, process wide, parallel analysis gets you rate limited
     pub analysis: Arc<tokio::sync::Semaphore>,
 }
 
@@ -48,8 +40,6 @@ impl AppState {
         }))
     }
 
-    /// The model assigned to a role, with a message that points at the fix
-    /// when nothing is configured.
     pub async fn role_model(&self, role: &str) -> AppResult<Resolved> {
         models::resolve_role(&self.db, &self.user_id, role).await?.ok_or_else(|| {
             AppError::Unsupported(format!(

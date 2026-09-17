@@ -4,22 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>notebook</title>
-<!-- Where this app is mounted, filled in by the server: empty at the site
-     root, "/notebook" when a reverse proxy serves it from a subdirectory.
-     Every URL below is built from it. -->
 <script>window.__BASE__ = "__BASE_PATH__";</script>
 <style>
   :root {
     color-scheme: dark;
-    --bg:#262624;          /* page */
-    --panel:#1f1e1d;       /* rails */
-    --raised:#30302e;      /* bubbles, inputs */
+    --bg:#262624;
+    --panel:#1f1e1d;
+    --raised:#30302e;
     --hover:#333331;
     --line:#3a3937;
     --fg:#faf9f5;
     --dim:#b8b5ad;
     --faint:#82807a;
-    --accent:#d97757;      /* clay */
+    --accent:#d97757;
     --blue:#7aa2c7;
     --bad:#e07a6a;
     --ok:#8fae7a;
@@ -33,15 +30,12 @@
     display:grid; grid-template-columns:264px minmax(0, 1fr);
     background:var(--bg); color:var(--fg); font:14px/1.55 var(--sans);
   }
-  /* The viewer takes a share of the window rather than a fixed slab, so the
-     conversation never gets squeezed into a column on a small screen. */
   body.with-viewer { grid-template-columns:264px minmax(0, 1fr) clamp(300px, 34vw, 460px); }
   button { font:inherit; cursor:pointer; color:inherit; }
   ::-webkit-scrollbar { width:10px; height:10px; }
   ::-webkit-scrollbar-thumb { background:#413f3c; border-radius:6px; }
   ::-webkit-scrollbar-track { background:transparent; }
 
-  /* ------------------------------------------------------- explorer */
   aside { background:var(--panel); border-right:1px solid var(--line);
           display:flex; flex-direction:column; min-width:0; }
 
@@ -49,8 +43,7 @@
               color:var(--dim); display:flex; }
   .icon-btn:hover { background:var(--hover); color:var(--fg); }
   .tree { flex:1; min-height:0; overflow:auto; padding:2px 0 8px; user-select:none; }
-  /* Two stacked sections in the rail. `flex:1 1 0` on both makes the split even
-     regardless of how many rows each holds, and each list scrolls on its own. */
+  /* flex:1 1 0 on both keeps the halves even; each list scrolls on its own */
   .rail-section { flex:1 1 0; min-height:0; display:flex; flex-direction:column;
                   border-bottom:1px solid var(--line); }
   .rail-section:last-of-type { border-bottom:0; }
@@ -78,15 +71,10 @@
   .node { display:flex; align-items:center; gap:6px; height:24px; padding:0 8px 0 0;
           font-size:13px; color:var(--dim); white-space:nowrap; cursor:default; }
   .node:hover { background:var(--hover); }
-  /* Selection is selection: what an action applies to and what a drag carries.
-     What the researcher reads is decided by attaching files to the
-     conversation, not by what happens to be highlighted here. */
   .node.selected { background:#33302c; color:var(--fg); }
   .node.selected:hover { background:#3a3733; }
   .node.sel { background:#3b3a37; color:var(--fg); }
   .node.drop { outline:1px solid var(--accent); outline-offset:-1px; }
-  /* What follows the cursor while dragging. Off screen until the browser
-     snapshots it, then thrown away. */
   .drag-ghost { position:fixed; top:-1000px; left:-1000px; display:flex;
                 align-items:center; gap:6px; padding:5px 10px; font-size:13px;
                 color:var(--fg); background:var(--raised);
@@ -99,7 +87,6 @@
   .node .state { margin-left:auto; font-size:11px; color:var(--faint); flex:none; }
   .node .state.failed { color:var(--bad); }
   .node .state.busy { color:var(--accent); }
-  /* Stored but not yet read: the row is there, just not usable yet. */
   .node.working .name { color:var(--faint); }
   .node .pages { font-size:11px; color:var(--faint); flex:none;
                  font-variant-numeric:tabular-nums; margin-left:auto; }
@@ -111,8 +98,7 @@
   @keyframes spin { to { transform:rotate(360deg); } }
   .node input { background:var(--bg); border:1px solid var(--accent); color:var(--fg);
                 font:inherit; border-radius:4px; padding:0 4px; width:100%; outline:none; }
-  /* Fixed height, because the scope button is taller than the line of text and
-     the bar would otherwise grow the moment a file goes into scope. */
+  /* fixed height, or the bar grows the moment a file goes into scope */
   .rail-foot #treeStatus { flex:1; min-width:0; overflow:hidden;
                           text-overflow:ellipsis; white-space:nowrap; }
   .rail-foot { height:40px; flex:none; padding:0 10px;
@@ -123,15 +109,12 @@
                       border-radius:6px; padding:3px 8px; font-size:12px;
                       line-height:1.35; color:var(--dim); }
   .rail-foot button:hover { color:var(--fg); border-color:#4d4b47; }
-  /* Progress sits along the top edge of the footer, so the bar appearing does
-     not move anything. */
+  /* progress sits on the footer's top edge so the bar appearing moves nothing */
   .rail-foot { position:relative; }
   .rail-progress { position:absolute; top:-1px; left:0; right:0; height:2px;
                    background:transparent; }
   .rail-progress i { display:block; height:100%; width:0; background:var(--accent);
                      transition:width .3s ease; }
-  /* The open vault under the status line, with settings beside it. The chip
-     hugs its name so the gear stays pinned to the right edge. */
   aside { position:relative; }
   .vault-bar { height:44px; flex:none; display:flex; align-items:center; gap:2px;
                padding:0 6px; border-top:1px solid var(--line); }
@@ -155,25 +138,19 @@
              padding:11px 0; border-bottom:1px solid #2e2d2b; }
   .setting select { width:250px; flex:none; }
 
-  /* ------------------------------------------------------------ chat */
-  /* min-height:0 on both, or the grid item and the flex child size themselves
-     to their content and push the composer off the bottom instead of scrolling. */
+  /* min-height:0 or the grid child sizes to content and pushes the composer off the bottom */
   main { display:flex; flex-direction:column; min-width:0; min-height:0; }
   #log { flex:1; min-height:0; overflow-y:auto; overflow-x:hidden; padding:28px 0 8px; }
   .thread { width:min(760px, 100%); margin:0 auto; padding:0 24px; }
   .turn { margin-bottom:26px; }
-  /* A column so the actions can sit under the bubble, both against the right. */
   .turn.user { display:flex; flex-direction:column; align-items:flex-end; }
   .turn.user .bubble { background:var(--raised); border-radius:14px; padding:9px 15px;
                        max-width:78%; white-space:pre-wrap; }
   .turn.user .msg-actions { margin-top:3px; font-size:12px; }
-  /* The files a question was asked about, under it: a record of what it
-     searched, and a way to open them. */
   .sent-files { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px;
                 margin-top:6px; max-width:78%; }
   .attach.sent { padding:6px 10px; cursor:pointer; }
   .attach.sent:hover { border-color:var(--accent); color:var(--fg); }
-  /* Editing a question in place: the composer, where the question already is. */
   .turn.user .editor { width:100%; background:var(--raised); border:1px solid var(--line);
                        border-radius:14px; padding:11px 14px 9px; }
   .turn.user .editor textarea { max-height:320px; font:15px/1.5 var(--sans); }
@@ -192,23 +169,18 @@
   .turn.assistant .body pre code { background:none; padding:0; font-size:12.5px; }
   .turn.assistant .body blockquote { margin:0 0 14px; padding-left:14px;
                                      border-left:2px solid var(--line); color:var(--dim); }
-  /* Rendered formulas. MathML inherits the surrounding serif, which is what we
-     want; it just needs a touch more size and room to breathe. */
   .turn.assistant .body math { font-size:1.06em; }
-  /* Tables scroll sideways inside their own box, so a wide one never makes the
-     page scroll. Sans and a little smaller than prose, the way data reads. */
+  /* a wide table scrolls inside its own box, never the page */
   .turn.assistant .body .table-wrap { overflow-x:auto; margin:0 0 14px; }
   .turn.assistant .body table { border-collapse:collapse; font:14px/1.5 var(--sans); }
   .turn.assistant .body th, .turn.assistant .body td {
       border:1px solid var(--line); padding:5px 12px; text-align:left; vertical-align:top; }
   .turn.assistant .body th { background:var(--raised); font-weight:600; }
   .turn.assistant .body .no-answer { color:var(--faint); font:14px/1.6 var(--sans); }
-  /* overflow-x on its own promotes overflow-y to auto, which puts a scrollbar
-     beside formulas that have nothing to scroll. Pin the vertical axis. */
+  /* overflow-x alone promotes overflow-y to auto, leaving a stray scrollbar beside formulas */
   .math-block { margin:0 0 16px; padding:4px 0; text-align:center;
                 overflow-x:auto; overflow-y:hidden; }
   .math-block math { font-size:1.16em; }
-  /* Fallback for anything the converter does not cover: the source, legibly. */
   .math-src { font:13.5px var(--mono); color:#e8c9a0; }
   pre.math-src { background:#1c1b1a; border:1px solid var(--line); border-radius:10px;
                  padding:10px 14px; margin:0 0 14px;
@@ -222,13 +194,9 @@
   .cite:hover { border-color:var(--accent); color:var(--fg); }
   .cite .count { color:var(--faint); font-size:11px;
                  font-variant-numeric:tabular-nums; }
-  /* Copy, retry and when it was said. They live on the meta line and only
-     show while the answer is under the pointer, so a finished transcript stays
-     quiet. Opacity rather than display, so revealing them moves nothing. */
+  /* opacity not display, so revealing the actions moves nothing */
   .msg-actions { display:flex; align-items:center; gap:2px;
                  opacity:0; transition:opacity .12s ease; }
-  /* On an answer the bar shares the meta line, so it takes the far end of it.
-     On a question the column already puts it against the right. */
   .turn.assistant .msg-actions { margin-left:auto; }
   .turn:hover .msg-actions, .msg-actions:focus-within { opacity:1; }
   .msg-actions button { background:transparent; border:0; color:var(--faint);
@@ -237,15 +205,11 @@
   .msg-actions button:hover { background:var(--hover); color:var(--fg); }
   .msg-actions button.done { color:var(--accent); }
   .msg-actions .when { color:var(--faint); padding:0 5px; white-space:nowrap; }
-  /* Where a citation lands in the rendition. */
   .viewer mark { background:#4a3a26; color:var(--fg); border-radius:3px; }
   .turn.note { color:var(--faint); font-size:13px;
                display:flex; align-items:center; gap:4px; }
   .turn.note.bad { color:var(--bad); }
   .thinking { color:var(--faint); font-size:13px; }
-  /* What the model did before answering, in order: each stretch of reasoning
-     and each tool call is one quiet line, and its detail opens in a card
-     underneath. The line has no box of its own; only the detail does. */
   .trace { margin:0 0 10px; }
   .step > button { display:inline-flex; align-items:center; gap:6px; padding:3px 0;
                    background:transparent; border:0; color:var(--faint); font-size:13px;
@@ -260,12 +224,10 @@
                   font-size:13px; line-height:1.55; white-space:pre-wrap;
                   overflow-wrap:anywhere; max-height:320px; overflow-y:auto; }
   .step.open .detail { display:block; }
-  /* A caret on the answer while tokens are still arriving. */
   .turn.live .body::after { content:'▍'; color:var(--accent); animation:blink 1s steps(1) infinite; }
   @keyframes blink { 50% { opacity:0; } }
   .empty-chat { color:var(--faint); text-align:center; margin-top:22vh; font-size:14px; }
 
-  /* -------------------------------------------------------- composer */
   .composer-wrap { padding:0 24px 22px; position:relative;
                    width:min(808px, 100%); margin:0 auto; }
   .composer { background:var(--panel); border:1px solid var(--line);
@@ -285,12 +247,10 @@
           width:32px; height:30px; font-weight:700; display:flex;
           align-items:center; justify-content:center; }
   .send:disabled { opacity:.35; cursor:not-allowed; }
-  /* Running: the same control becomes stop, the way Esc does. */
   .send.stop { background:transparent; border:1px solid var(--line); color:var(--fg); }
   .send.stop:hover { border-color:var(--accent); }
   .send .sq { width:9px; height:9px; background:currentColor; border-radius:2px; }
 
-  /* Attachments: the files the next question will ask about. */
   .attachments { display:flex; flex-wrap:wrap; align-items:center; gap:6px;
                  margin-bottom:8px; }
   .attachments[hidden] { display:none; }
@@ -308,7 +268,6 @@
   .attachments .drop-all { background:transparent; border:0; color:var(--faint);
                            font-size:12px; padding:4px 6px; border-radius:6px; }
   .attachments .drop-all:hover { color:var(--fg); background:var(--hover); }
-  /* Where a dragged file lands. */
   main.drop-target .composer { border-color:var(--accent); }
   main.drop-target #log { outline:2px dashed #4a453f; outline-offset:-14px;
                           border-radius:14px; }
@@ -326,7 +285,6 @@
   .qchip button:hover { background:var(--hover); color:var(--fg); }
   .qchip button.steer:hover { color:var(--accent); }
 
-  /* Slash command menu, anchored above the composer. */
   .cmds { position:absolute; left:24px; bottom:calc(100% + 6px); z-index:25;
           background:#2c2b29; border:1px solid var(--line); border-radius:10px;
           padding:5px; min-width:280px; box-shadow:0 16px 40px rgba(0,0,0,.55); }
@@ -348,14 +306,9 @@
   .ring .fill { stroke:var(--accent); stroke-linecap:round;
                 transform:rotate(-90deg); transform-origin:50% 50%; }
 
-  /* --------------------------------------------------------- viewer */
-  /* min-height:0 on both, or a long rendition sizes the pane by its content,
-     stretching the whole grid and pushing the sources rail out of view,
-     instead of scrolling inside the pane. */
   .viewer { background:var(--panel); border-left:1px solid var(--line);
             display:flex; flex-direction:column; min-width:0; min-height:0; }
-  /* A class with `display` outranks the browser's [hidden] rule, so say it here
-     or the pane keeps its grid slot and wraps under the explorer. */
+  /* a class with display outranks the browser's [hidden] rule */
   .viewer[hidden] { display:none; }
   .viewer header { display:flex; align-items:center; gap:8px; padding:10px 12px;
                    border-bottom:1px solid var(--line); }
@@ -381,7 +334,6 @@
       box-shadow:-18px 0 40px rgba(0,0,0,.45); }
   }
 
-  /* -------------------------------------------------------- menus */
   .ctx { position:fixed; z-index:80; background:#2c2b29; border:1px solid var(--line);
          border-radius:10px; padding:5px; min-width:190px;
          box-shadow:0 16px 40px rgba(0,0,0,.55); }
@@ -405,7 +357,6 @@
               margin:6px 10px 10px; }
   .barmeter i { display:block; height:100%; background:var(--accent); }
 
-  /* --------------------------------------------------------- dialog */
   #dialog { z-index:90; }
   .dialog { width:min(420px, 100%); }
   .dialog .head { padding:14px 16px 0; font-weight:600; font-size:14px; }
@@ -428,7 +379,6 @@
   .dialog .actions .btn.danger { border-color:#5c3a35; }
   .dialog .actions .btn.danger:hover { background:#3a2724; }
 
-  /* -------------------------------------------------------- modals */
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.62); z-index:60;
            display:flex; align-items:center; justify-content:center; padding:34px; }
   .modal[hidden] { display:none; }
@@ -480,7 +430,6 @@
   .hint.bad { color:var(--bad); }
   h2.section { font-size:11px; text-transform:uppercase; color:var(--faint);
                letter-spacing:.09em; margin:24px 0 8px; }
-  /* ------------------------------------------------------ settings */
   .settings-wrap { display:flex; min-height:0; flex:1; }
   .settings-rail { width:214px; flex:none; border-right:1px solid var(--line);
                    padding:12px 8px; overflow:auto; }
@@ -636,7 +585,6 @@
   </div>
 </div>
 
-<!-- ----------------------------------------------------- configure ---- -->
 <div class="modal" id="configure" hidden>
   <div class="sheet">
     <header>
@@ -696,7 +644,6 @@
   </div>
 </div>
 
-<!-- ------------------------------------------------ provider form ----- -->
 <div class="modal" id="providerForm" hidden>
   <div class="sheet" style="width:min(520px,100%)">
     <header><b id="pfTitle">Add provider</b><span class="spacer"></span>
@@ -721,7 +668,6 @@
   </div>
 </div>
 
-<!-- -------------------------------------------------------- vaults ---- -->
 <div class="modal" id="vaultManager" hidden>
   <div class="sheet" style="width:min(560px,100%)">
     <header><b>Vaults</b><span class="spacer"></span>
@@ -729,7 +675,7 @@
     <div class="scroll" style="padding-top:6px">
       <div id="vaultRows"></div>
       <div class="vault-new">
-        <input type="text" id="newVaultName" class="grow" placeholder="New vault name, e.g. MAT102">
+        <input type="text" id="newVaultName" class="grow" placeholder="New vault name">
         <button class="btn" id="createVaultBtn">Create vault</button>
       </div>
       <div class="hint" id="vaultHint">
@@ -741,7 +687,6 @@
   </div>
 </div>
 
-<!-- ------------------------------------------------------ settings ---- -->
 <div class="modal" id="settings" hidden>
   <div class="sheet" style="width:min(780px,100%)">
     <header><b>Settings</b><span class="spacer"></span>
@@ -784,14 +729,10 @@ async function api(path, opts = {}) {
   const r = await fetch(BASE + path, opts);
   const body = await r.json().catch(() => ({ error: r.statusText }));
   if (!r.ok) {
-    // No session means someone else's browser, an expired cookie or a fresh
-    // profile: the login page is the only thing left to see.
     if (r.status === 401 && !location.pathname.startsWith(BASE + '/login')) {
       location.href = BASE + '/login';
     }
     const error = new Error(body.error || r.statusText);
-    // The server labels failures it expects the client to act on, such as
-    // `kind: "rate_limited"`, which carries the model that ran out of capacity.
     error.payload = body;
     error.status = r.status;
     throw error;
@@ -807,7 +748,6 @@ const bytes = n => n >= 1e6 ? (n / 1048576).toFixed(1) + ' MB'
 const esc = s => s.replace(/[&<>"']/g, c =>
   ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 
-/* ------------------------------------------------------------- icons */
 const ICON = {
   folder: '<path d="M1.8 12.6V3.9a.8.8 0 0 1 .8-.8h3.1l1.4 1.7h6.1a.8.8 0 0 1 .8.8v7a.8.8 0 0 1-.8.8H2.6a.8.8 0 0 1-.8-.8z"/>',
   file:   '<path d="M9 1.6H4.2a1 1 0 0 0-1 1v10.8a1 1 0 0 0 1 1h7.6a1 1 0 0 0 1-1V5.4z"/><path d="M9 1.6v3.8h3.8"/>',
@@ -833,25 +773,19 @@ function iconSvg(kind, filename) {
          '" stroke-width="1.3" stroke-linejoin="round">' + shape + label + '</svg>';
 }
 
-/* ---------------------------------------------------------- explorer */
 async function loadTree() {
   const data = await api('/api/sources');
   const previous = new Map(state.sources.map(s => [s.id, s.status]));
   state.sources = data.sources;
   state.folders = data.folders;
-  // Another tab may have switched vaults; the chip should say what is listed.
   if (data.vault_id && state.vault && data.vault_id !== state.vault.id) loadVaults();
   renderTree();
 
-  // Anything that just finished is worth saying out loud, since the file may
-  // have been queued minutes ago.
   for (const s of state.sources) {
     const before = previous.get(s.id);
     if (!before || before === s.status) continue;
     if (s.status === 'failed') {
       const detail = s.error_detail ? JSON.parse(s.error_detail) : {};
-      // A failure the client can do something about gets the dialog that does
-      // it; everything else is a line in the thread.
       if (detail.kind === 'rate_limited' || detail.kind === 'modality') {
         analyzerFailed(s, { message: detail.error || s.error, payload: detail });
       } else {
@@ -865,9 +799,7 @@ async function loadTree() {
   return data;
 }
 
-/* Poll only while the server has work in flight. Analysis outlives the request
-   that started it, so this is also what picks the state back up after a
-   refresh or a restart. */
+/* poll only while work is in flight; analysis outlives the request that started it */
 function watchAnalysis() {
   const working = state.sources.filter(
     s => s.status === 'pending' || s.status === 'analyzing').length;
@@ -878,10 +810,7 @@ function watchAnalysis() {
   state.analysisTimer = setTimeout(() => loadTree().catch(() => {}), 1500);
 }
 
-/* Rebuilding every row on each poll restarted every spinner mid turn, which
-   is what made the animation look like it skipped. So the shape of the tree is
-   computed first, and when it has not changed the existing rows are patched in
-   place and their animations keep running. */
+/* rebuilding rows each poll restarts every spinner, so patch in place unless the shape changed */
 function renderTree() {
   const rows = [];
   collectRows(null, 0, rows);
@@ -913,8 +842,6 @@ function collectRows(parentId, depth, out) {
   }
 }
 
-/* Update one existing row without replacing it. Only the status block is
-   rebuilt, and only when the status actually changed. */
 function patchNode(el, row) {
   if (!el) return;
   if (row.kind === 'folder') {
@@ -936,8 +863,6 @@ function patchNode(el, row) {
     el.dataset.progress = source.progress || '';
     return;
   }
-  // Only the count changes while a long file is read, so the spinner element
-  // stays put and its rotation carries on.
   if ((source.progress || '') !== el.dataset.progress) {
     el.dataset.progress = source.progress || '';
     const pages = el.querySelector('.pages');
@@ -952,9 +877,6 @@ function patchNode(el, row) {
 
 const isWorking = s => s.status === 'pending' || s.status === 'analyzing';
 
-/* What sits at the right of a row: a spinner while it is working, with the
-   page count for a long file, or the word failed. Returns a fragment so the
-   count and the spinner can be separate elements. */
 function statusMark(source) {
   const frag = document.createDocumentFragment();
   if (isWorking(source)) {
@@ -986,9 +908,6 @@ function nodeTitle(source) {
   return `${source.kind}, ${bytes(source.byte_size)}`;
 }
 
-/* The footer carries what the library is doing and what is selected, together.
-   Analysis can run for an hour on a long file, and losing the scope readout and
-   the clear button for that whole time is no good. */
 function renderTreeStatus() {
   const working = state.sources.filter(s => s.status === 'pending' || s.status === 'analyzing');
   const bar = $('#railProgress');
@@ -1001,7 +920,6 @@ function renderTreeStatus() {
     const total = state.analysisTotal || working.length;
     const done = Math.max(0, total - working.length);
     const single = working.length === 1 ? working[0] : null;
-    // One long file reports its pages, a queue reports its position.
     lead = total > 1 ? `analyzing ${done + 1} of ${total}`
          : single?.progress ? `analyzing ${single.progress}`
          : 'analyzing 1 file';
@@ -1077,7 +995,6 @@ function sourceNode(row) {
   el.ondblclick = () => openViewer(source);
   el.oncontextmenu = e => {
     e.preventDefault();
-    // Right clicking outside the selection moves the selection there first.
     if (!state.selected.has(source.id)) selectSource(source, {});
     sourceMenu(e, source);
   };
@@ -1086,10 +1003,7 @@ function sourceNode(row) {
   return el;
 }
 
-/* Explorer selection: click picks one, ctrl or cmd adds and removes, shift
-   takes the range from the last click. Selection is what an action applies to
-   and what a drag carries; narrowing a question is done by dragging files into
-   the conversation. */
+/* selection is only what an action applies to and what a drag carries */
 function selectSource(source, e = {}) {
   const order = state.rowOrder;
   const additive = e.ctrlKey || e.metaKey;
@@ -1113,7 +1027,6 @@ function selectSource(source, e = {}) {
   renderTree();
 }
 
-/* Drag the whole selection, and show what is moving under the cursor. */
 function startDrag(e, source) {
   if (!state.selected.has(source.id)) selectSource(source, {});
   state.dragging = [...state.selected];
@@ -1143,8 +1056,7 @@ async function drop(folderId) {
   loadTree();
 }
 
-/* A drag holds the pointer, so the wheel does not scroll the list. Nudge it
-   when the cursor sits near either edge, the way a file manager does. */
+/* a drag holds the pointer, so the wheel does nothing; nudge on the edge */
 function dragScrollFrom(e) {
   const tree = $('#tree');
   const box = tree.getBoundingClientRect();
@@ -1176,7 +1088,6 @@ $('#tree').ondrop = e => {
   e.preventDefault();
   if (state.dragging) drop(null);
 };
-// Clicking past the last row clears the selection, like any file list.
 $('#tree').addEventListener('mousedown', e => {
   if (e.target !== $('#tree') || e.button !== 0) return;
   state.selected.clear();
@@ -1198,9 +1109,6 @@ async function createFolder(parentId) {
   loadTree();
 }
 
-/* ----------------------------------------------------------- dialogs */
-/* Native alert, confirm and prompt block the page, cannot be styled, and look
-   nothing like the rest of this. These are the same three shapes, promised. */
 
 function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cancel',
                   danger = false, input = null, choices = null, fields = null }) {
@@ -1219,7 +1127,6 @@ function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cance
     let control = null;
     const controls = {};
 
-    // A multi field form: the same dialog, resolving to an object of values.
     if (fields) {
       const form = document.createElement('div');
       form.className = 'form';
@@ -1294,7 +1201,6 @@ function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cance
           const raw = input.value.trim();
           if (!raw) {
             if (f.required) {
-              // Keep the dialog open and point at what is missing.
               input.classList.add('bad');
               input.focus();
               return;
@@ -1332,8 +1238,7 @@ function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cance
     modal.hidden = false;
     modal.onclick = e => { if (e.target === modal) done(null); };
     document.addEventListener('keydown', onKey, true);
-    // Never hand focus to a destructive button: Enter still confirms, but a
-    // stray space bar cancels rather than deletes.
+    // never focus a destructive button: space should cancel, not delete
     (control || (danger && cancel) || ok).focus();
     if (control && control.select) control.select();
   });
@@ -1355,9 +1260,8 @@ const askChoice = (title, message, choices, confirmLabel = 'OK') =>
 const askFields = (title, message, fields, confirmLabel = 'Save') =>
   dialog({ title, message, fields, confirmLabel });
 
-/* ------------------------------------------------------ context menu */
 function showMenu(e, items) {
-  // Stop the document handler below from closing the menu we are opening.
+  // stop the document click handler from closing the menu we just opened
   e.stopPropagation();
   const ctx = $('#ctx');
   ctx.innerHTML = '';
@@ -1432,13 +1336,7 @@ function folderMenu(e, folder) {
   ]);
 }
 
-/* The server waits out a rate limit on its own schedule. When the provider is
-   still refusing after that, the decision is a person's: run this file on a
-   different model, or leave it. */
-/* Two failures are worth offering a way out of rather than just reporting:
-   a provider that ran out of capacity, and a model that will not take the kind
-   of content the file needs. Both come down to the same question, which model
-   should read this instead, so both ask it the same way. */
+/* rate limit or a model that refuses the content: both ask which model should read it instead */
 async function analyzerFailed(source, error) {
   const payload = error.payload || {};
   const kind = payload.kind;
@@ -1451,8 +1349,6 @@ async function analyzerFailed(source, error) {
   let candidates = [];
   try {
     const { models } = await api('/api/models');
-    // A file that needs looking at needs a model that can look at it, and in
-    // either case not the one that just failed.
     candidates = models.filter(m => m.supports_vision && m.id !== payload.model_id);
   } catch (e) {
     note(e.message, true);
@@ -1482,7 +1378,6 @@ async function analyzerFailed(source, error) {
   await reanalyze(source, pick);
 }
 
-/* Re-run the analyzer, optionally on a model chosen by hand. */
 async function reanalyze(source, modelId) {
   note(`queued ${source.title} for the analyzer${modelId ? ' on the model you picked' : ''}`);
   try {
@@ -1491,13 +1386,10 @@ async function reanalyze(source, modelId) {
   } catch (e) {
     await analyzerFailed(source, e);
   }
-  // The outcome arrives through the status watcher, not this request.
   state.analysisTotal = 0;
   loadTree();
 }
 
-/* Queue several files at once. The server analyzes one at a time, so this
-   only fills its queue; the rows spin and the footer counts them down. */
 async function reanalyzeMany(ids) {
   note(`queued ${ids.length} files for the analyzer`);
   for (const id of ids) {
@@ -1512,8 +1404,6 @@ async function reanalyzeMany(ids) {
   loadTree();
 }
 
-/* How many files an action on this row applies to: the selection when the row
-   is part of it, otherwise just the row. */
 function selectionCount(source) {
   return state.selected.has(source.id) ? state.selected.size : 1;
 }
@@ -1553,7 +1443,6 @@ async function moveSource(source) {
   loadTree();
 }
 
-/* ------------------------------------------------------------ upload */
 document.addEventListener('dragover', e => {
   if (e.dataTransfer?.types.includes('Files')) { e.preventDefault(); $('#tree').classList.add('drop-root'); }
 });
@@ -1580,14 +1469,10 @@ async function upload(files, folderId) {
   if (target) fd.append('folder_id', target);
 
   try {
-    // This returns as soon as the bytes are on disk. Analysis runs server side
-    // from there, so the rows appear at once and fill in as they are read.
+    // returns once the bytes are on disk; analysis runs server side
     const res = await api('/api/sources', { method: 'POST', body: fd });
     state.analysisTotal = res.uploaded.length;
     if (target) state.open.add(target);
-    // A file the analyzer cannot read is turned away by the server rather than
-    // stored to fail later. One bad file never sinks the rest of the drop, so
-    // say which ones did not make it and why.
     const refused = res.rejected || [];
     if (refused.length) {
       say(refused.map(r => (r.filename || 'a file') + ': ' + r.reason).join('\n\n'),
@@ -1601,11 +1486,9 @@ async function upload(files, folderId) {
   loadTree();
 }
 
-/* ------------------------------------------------------------ viewer */
 async function openViewer(source, locator = null) {
   state.viewerSource = source;
   state.viewerLocator = locator;
-  // A citation is a place in the rendition, so that is the tab to land on.
   state.viewerTab = locator ? 'rendition'
                   : source.kind === 'text' ? 'rendition'
                   : (source.kind === 'image' || source.kind === 'pdf') ? 'original'
@@ -1673,8 +1556,6 @@ async function renderViewer() {
         `<div class="facts" style="margin-bottom:10px">${doc.chunks.length} chunks indexed</div>`;
       const pre = document.createElement('pre');
 
-      // "line 249" points at a line of this rendition, so mark it and scroll
-      // there rather than dropping the reader at the top of a long file.
       const wanted = Number((state.viewerLocator || '').match(/(\d+)/)?.[1]);
       const lines = doc.document.markdown.split('\n');
       if (wanted && wanted <= lines.length) {
@@ -1711,11 +1592,7 @@ async function renderViewer() {
   body.append(facts);
 }
 
-/* ------------------------------------------------------------- math */
-/* LaTeX to MathML. Browsers render MathML natively, so a subset converter buys
-   real formulas with no library, no fonts and no build step. Anything outside
-   the subset falls back to showing the source, which is what the answer showed
-   before this existed. */
+/* a small LaTeX subset to MathML: browsers lay it out natively, no library or fonts */
 
 const GREEK = {
   alpha:'α', beta:'β', gamma:'γ', delta:'δ', epsilon:'ϵ',
@@ -1742,7 +1619,6 @@ const SYMBOL = {
   perp:'⊥', parallel:'∥', langle:'⟨', rangle:'⟩',
   hbar:'ℏ', ell:'ℓ', Re:'ℜ', Im:'ℑ', aleph:'ℵ',
   star:'⋆', ast:'∗', oplus:'⊕', otimes:'⊗',
-  // Divisibility and set relations turn up constantly in number theory notes.
   mid:'∣', nmid:'∤', nparallel:'∦', setminus:'∖', supset:'⊃', supseteq:'⊇',
   subsetneq:'⊊', supsetneq:'⊋', ncong:'≇', doteq:'≐', asymp:'≍',
   implies:'⟹', impliedby:'⟸', iff:'⟺', therefore:'∴', because:'∵',
@@ -1751,8 +1627,6 @@ const SYMBOL = {
   leftrightarrow:'↔', Leftrightarrow:'⇔', nearrow:'↗', searrow:'↘',
   lfloor:'⌊', rfloor:'⌋', lceil:'⌈', rceil:'⌉', wedge:'∧', vee:'∨',
   bullet:'∙', dagger:'†', colon:':', sqrtsign:'√', surd:'√',
-  // Logic, order and set symbols found missing by sweeping the converter with
-  // the macros propositional logic and set theory notes are written in.
   lnot:'¬', top:'⊤', bot:'⊥', gets:'←', nexists:'∄', ni:'∋', complement:'∁',
   veebar:'⊻', barwedge:'⊼', Longrightarrow:'⟹', longleftarrow:'⟵',
   Longleftarrow:'⟸', longleftrightarrow:'⟷', Longleftrightarrow:'⟺',
@@ -1762,16 +1636,12 @@ const SYMBOL = {
   nsubseteq:'⊈', nsupseteq:'⊉', sqcup:'⊔', sqcap:'⊓', uplus:'⊎',
 };
 
-/// Commands that change layout rather than content, and have nothing to say
-/// in MathML.
 const IGNORED = ['displaystyle', 'textstyle', 'scriptstyle', 'limits', 'nolimits',
                  'nonumber', 'notag', 'allowbreak', 'noalign', 'smallskip',
                  'medskip', 'bigskip', 'left.', 'right.',
-                 // Delimiter sizing: MathML stretches fences on its own.
                  'big', 'Big', 'bigg', 'Bigg', 'bigl', 'Bigl', 'biggl', 'Biggl',
                  'bigr', 'Bigr', 'biggr', 'Biggr', 'bigm', 'Bigm', 'mathstrut',
                  'strut', 'protect', 'relax'];
-/// Commands whose one argument is discarded.
 const DISCARDS_ARGUMENT = ['label', 'tag', 'ref', 'eqref', 'intertext', 'hspace',
                            'vspace'];
 
@@ -1789,9 +1659,7 @@ const VARIANTS = { mathbf:'bold', mathbb:'double-struck', mathcal:'script',
                    mathfrak:'fraktur', mathit:'italic', mathrm:'normal',
                    mathsf:'sans-serif', mathtt:'monospace', bm:'bold-italic' };
 
-/* Where each style's capital A, small a and digit 0 sit among Unicode's
-   mathematical alphanumerics, plus the letters encoded earlier elsewhere, which
-   leave holes in the run (the double-struck N is U+2115, not in the block). */
+/* letters encoded elsewhere leave holes in the Unicode runs */
 const STYLED = {
   'bold':          { A: 0x1D400, a: 0x1D41A, zero: 0x1D7CE },
   'italic':        { A: 0x1D434, a: 0x1D44E, holes: { h: 0x210E } },
@@ -1852,11 +1720,7 @@ function texTokens(src) {
   return out;
 }
 
-/* Returns a MathML string, or null when the input uses something outside the
-   subset. Null is the signal to show the source instead. */
-/* Which environments are understood, and how their columns line up. TeX
-   aligns the odd columns of `align` right and the even ones left, which is what
-   puts the equals signs under each other. */
+/* align sets odd columns right and even left, so the equals signs stack */
 const ENVIRONMENTS = {
   'align': 'align', 'align*': 'align', 'aligned': 'align', 'alignat': 'align',
   'alignat*': 'align', 'split': 'align', 'eqnarray': 'align', 'eqnarray*': 'align',
@@ -1894,10 +1758,7 @@ function texToMathml(tex, display) {
     return one == null ? fail() : one;
   }
 
-  /* A braced argument read as text rather than as mathematics. The tokenizer
-     drops spaces, which is right for symbols and wrong for prose, so text that
-     keeps its spaces is cut from the source between the matching braces. Names
-     (environments, styled letters) keep the old spaceless reading. */
+  /* tokenizer drops spaces, right for symbols but wrong for prose, so text is cut from the source */
   function textArgument(keepSpaces = false) {
     if (i >= tokens.length || tokens[i].t !== '{') return null;
     const openAt = i++;
@@ -1945,8 +1806,7 @@ function texToMathml(tex, display) {
     if (VARIANTS[name]) {
       const text = textArgument();
       if (text === null) return { html: fail() };
-      // Browsers honour no mathvariant but "normal", so \mathbb{N} came out as
-      // a plain N. The styled letters exist in Unicode; use those instead.
+      // browsers honour no mathvariant but normal, so use the real Unicode letters
       return { html: '<mi mathvariant="normal">' +
                      esc(styledLetters(text, VARIANTS[name])) + '</mi>' };
     }
@@ -1957,8 +1817,7 @@ function texToMathml(tex, display) {
     if (name === 'text' || name === 'textrm' || name === 'mbox' || name === 'operatorname') {
       const text = textArgument(true);
       if (text === null) return { html: fail() };
-      // MathML trims the ends of a text run, and `a \text{ is a set }` needs
-      // them: those spaces are what keep the words off the symbols.
+      // MathML trims the ends of a text run, which eats the spaces around words
       const padded = text.replace(/^\s+/, ' ').replace(/\s+$/, ' ');
       return { html: '<mtext>' + esc(padded) + '</mtext>' };
     }
@@ -1976,7 +1835,6 @@ function texToMathml(tex, display) {
       if (textArgument() === null) return { html: fail() };
       return { html: '' };
     }
-    // \not before a relation strikes it through: \not\in is ∉, \not= is ≠.
     if (name === 'not') {
       const next = tokens[i];
       if (!next) return { html: fail() };
@@ -1987,11 +1845,9 @@ function texToMathml(tex, display) {
       i++;
       const key = next.t === 'cmd' || next.t === 'ch' ? next.v : null;
       if (key && NEGATED[key]) return { html: '<mo>' + esc(NEGATED[key]) + '</mo>' };
-      // Anything else gets the slash TeX would draw over it.
       const glyph = next.t === 'cmd' ? SYMBOL[next.v] : next.v;
       return glyph ? { html: '<mo>' + esc(glyph + '̸') + '</mo>' } : { html: fail() };
     }
-    // "mod" as an operator, and the parenthesised form used in congruences.
     if (name === 'bmod') return { html: '<mo lspace="0.28em" rspace="0.28em">mod</mo>' };
     if (name === 'pmod') {
       const arg = argument();
@@ -2028,26 +1884,18 @@ function texToMathml(tex, display) {
     if (name === 'begin') {
       const env = textArgument();
       if (env === null || !(env in ENVIRONMENTS)) return { html: fail() };
-      // `array` carries a column spec that MathML does not need.
       if (env === 'array' && tokens[i] && tokens[i].t === '{') textArgument();
       return { html: environment(env) };
     }
-    // A row break or an `end` outside an environment is nothing to lay out.
     if (name === 'end' || name === '\\') return { html: fail() };
 
-    /* Anything else is a macro this converter has never heard of. If it takes
-       no argument, its name is a reasonable rendering and the rest of the
-       formula survives; one unknown symbol should not send a whole derivation
-       back to raw source. A macro with arguments is a different matter, since
-       guessing its layout would be inventing mathematics. */
+    /* an unknown no-arg macro renders as its name; one with arguments fails the expression */
     if (/^[a-zA-Z]+$/.test(name) && !(tokens[i] && tokens[i].t === '{')) {
       return { html: '<mi mathvariant="normal">' + esc(name) + '</mi>' };
     }
     return null;
   }
 
-  /* Rows of cells until the matching \end: cells split on `&`, rows on `\\`,
-     which is exactly how the source reads. */
   function environment(env) {
     const rows = [];
     let row = [];
@@ -2125,8 +1973,6 @@ function texToMathml(tex, display) {
     return null;
   }
 
-  /* A base plus whatever sub and superscripts follow it. Big operators take
-     their limits above and below in display mode, the way TeX sets them. */
   function scripted() {
     const base = atom();
     if (!base) return null;
@@ -2169,48 +2015,36 @@ function texToMathml(tex, display) {
          body + '</mrow></math>';
 }
 
-/* -------------------------------------------------------- markdown */
 function markdown(src) {
   const held = [];
   const hold = html => '' + (held.push(html) - 1) + '';
 
-  // Code fences and math come out first, so escaping never touches them.
+  // code fences and maths come out first, so escaping never touches them
   let text = src.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) =>
     hold('<pre><code>' + esc(code.replace(/\n$/, '')) + '</code></pre>'));
-  // Some models put narrow no-break spaces between ordinary words, and at a
-  // fifth of an em "is T" reads as "isT". In prose a space is a space.
+  // some models put narrow no-break spaces between words; in prose a space is a space
   text = text.replace(/[  ]/g, ' ');
 
   const renderMath = (tex, display) => {
-    // Nothing left to lay out, typically a citation the model wrapped in maths,
-    // `\[ [notes.pdf, line 3] \]`, whose mark is already gone: draw nothing
-    // rather than an empty source box.
     if (!tex.trim()) return '';
     const mathml = texToMathml(tex.trim(), display);
     if (mathml) return display ? '<div class="math-block">' + mathml + '</div>' : mathml;
-    // Outside the subset: show the source rather than a wrong formula.
     return display ? '<pre class="math-src">' + esc(tex.trim()) + '</pre>'
                    : '<span class="math-src">' + esc(tex.trim()) + '</span>';
   };
 
-  // Models often emit an environment with no delimiters around it at all,
-  // and it is still mathematics.
   const BARE_ENV = /\\begin\{([a-zA-Z*]+)\}[\s\S]*?\\end\{\1\}/g;
 
   text = text
     .replace(/\$\$([\s\S]+?)\$\$/g, (_, tex) => hold(renderMath(tex, true)))
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, tex) => hold(renderMath(tex, true)))
-    // An inline span may not run through the opening of another, or one \(
-    // left unclosed would swallow the prose up to the next formula's \).
     .replace(/\\\(((?:(?!\\\()[\s\S])+?)\\\)/g, (_, tex) => hold(renderMath(tex, false)))
-    // A \( that never closes still opened mathematics. It runs to the end of
-    // its sentence, and is taken only when what is there is LaTeX that really
-    // renders; anything else is left exactly as written.
+    // an unclosed \( runs to the end of its sentence, only if it parses as LaTeX
     .replace(/\\\(((?:(?!\\\(|\n)[\s\S])+?)(?=(?<!\\)[.;]\s|\n|$)/g, (m, tex) => {
       const mathml = /\\[a-zA-Z]/.test(tex) ? texToMathml(tex.trim(), false) : null;
       return mathml ? hold(mathml) : m;
     })
-    // Inline needs non-space at both ends, so prices stay prices.
+    // $ needs non-space at both ends so prices stay prices
     .replace(/\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, tex) => hold(renderMath(tex, false)))
     .replace(BARE_ENV, m => hold(renderMath(m, true)));
 
@@ -2232,10 +2066,6 @@ function markdown(src) {
     if (solo) { closeList(); out.push(held[+solo[1]]); continue; }
     if (!line.trim()) { closeList(); continue; }
 
-    /* A table: a header row, the row of dashes under it with as many columns,
-       then rows until the first line without a pipe. Maths was taken out
-       before this, so a `|x|` in a cell cannot split it, and cells go through
-       the same inline pass as prose. */
     const rule = n + 1 < lines.length ? lines[n + 1] : '';
     if (line.includes('|') && TABLE_RULE.test(rule) &&
         tableCells(rule).length === tableCells(line).length) {
@@ -2283,16 +2113,11 @@ function markdown(src) {
   }
   closeList();
 
-  // Put the held blocks back, including any that sat inside a paragraph.
   return out.join('').replace(/(\d+)/g, (_, n) => held[+n]);
 }
 
-/* The row of dashes under a table's header: `|---|:---:|--:|`, with the pipes
-   at either end optional and at least one dash to a column. */
 const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
-/* A table row's cells: split on pipes that are neither escaped nor inside a
-   code span, with the optional pipes at either end dropped. */
 function tableCells(row) {
   let s = row.trim();
   if (s.startsWith('|')) s = s.slice(1);
@@ -2310,10 +2135,6 @@ function tableCells(row) {
   return cells;
 }
 
-/* --------------------------------------------------- attachments */
-/* Files the next question is about. Dragged in from the explorer, they sit
-   above the composer until the question is sent, then go with it: they show
-   under the question, and the composer is clear for the next one. */
 
 function attachSources(ids) {
   const added = ids.filter(id => !state.attached.includes(id) &&
@@ -2330,7 +2151,6 @@ function detachSource(id) {
 
 function renderAttachments() {
   const box = $('#attachments');
-  // A source can be deleted while attached.
   state.attached = state.attached.filter(id => state.sources.some(s => s.id === id));
   box.innerHTML = '';
   box.hidden = !state.attached.length;
@@ -2362,8 +2182,6 @@ function renderAttachments() {
   }
 }
 
-/* The conversation is the drop target. Files from the explorer become
-   attachments; files from the desktop are uploaded, as they always were. */
 const chatPane = document.querySelector('main');
 
 chatPane.addEventListener('dragover', e => {
@@ -2388,12 +2206,10 @@ chatPane.addEventListener('drop', e => {
     return;
   }
   if (e.dataTransfer?.files?.length) {
-    // Uploading is handled once, by the document level handler.
     return;
   }
 });
 
-/* --------------------------------------------------------------- chat */
 function emptyState() {
   if ($('#thread').children.length) return;
   const el = document.createElement('div');
@@ -2406,10 +2222,7 @@ function emptyState() {
 }
 function clearEmpty() { document.getElementById('emptyChat')?.remove(); }
 
-/* A question's files as the thread shows them. Live they are source ids; from
-   storage they are {id, title, kind}, as they were when it was asked. The chip
-   looks the file up when clicked rather than when drawn, since a reopened
-   conversation can be drawn before the file list has loaded. */
+/* chips from storage are {id,title,kind}; look the file up when clicked, not when drawn */
 function sentFiles(files) {
   const row = document.createElement('div');
   row.className = 'sent-files';
@@ -2432,7 +2245,6 @@ function sentFiles(files) {
   return row;
 }
 
-/* The ids to ask with again, from either form. */
 const fileIds = files => (files || []).map(f => typeof f === 'string' ? f : f.id);
 
 function userTurn(text, messageId, files = []) {
@@ -2463,8 +2275,6 @@ function assistantTurn() {
   el.timer = setInterval(() => {
     const secs = Math.round((Date.now() - started) / 1000);
     label.textContent = `Thinking ${secs}s`;
-    // Once a stretch of reasoning is showing, its line is the status instead,
-    // counting that stretch rather than the whole turn.
     const live = el.querySelector('.step.thought.live');
     if (live) live.querySelector('.label').textContent =
       `Thinking… ${Math.round((Date.now() - +live.dataset.since) / 1000)}s`;
@@ -2473,11 +2283,6 @@ function assistantTurn() {
   return el;
 }
 
-/* What a turn did before its answer, as quiet lines above it: each stretch of
-   reasoning and each tool call, in the order they happened. A line opens to
-   show its detail in a card underneath: the reasoning itself, or what a call
-   found. Made on the first step, so a turn that goes straight to its answer
-   shows only the plain timer. */
 function traceOf(turn) {
   let trace = turn.querySelector('.trace');
   if (!trace) {
@@ -2507,12 +2312,9 @@ function setDetail(step, text, { append = false } = {}) {
   step.classList.toggle('has-detail', detail.textContent.trim() !== '');
 }
 
-/* "searched cardinality" reads better as "Searched cardinality". */
 const toolLabel = line => line
   ? (line[0].toUpperCase() + line.slice(1)).replace(/_/g, ' ') : 'Used a tool';
 
-/* The steps as the server stored them, folded. A finished live turn and a
-   reopened one are drawn by this same function, so they always read alike. */
 function drawTrace(turn, steps) {
   turn.querySelector('.trace')?.remove();
   for (const s of steps) {
@@ -2525,7 +2327,6 @@ function drawTrace(turn, steps) {
   }
 }
 
-/* "1.91 seconds", "43 seconds", "2 minutes 5 seconds". */
 function thoughtFor(ms) {
   const s = ms / 1000;
   if (s < 1) return 'a moment';
@@ -2540,10 +2341,6 @@ function stopTimer(el) {
   el.timer = null;
 }
 
-/* A line in the thread for something that happened outside an answer. When
-   the thing that failed can be tried again, `retry` puts the same button under
-   the pointer that a finished answer has: a turn that died halfway is the one
-   you most want to redo, and it is the one that had nowhere to redo from. */
 function note(text, bad, retry) {
   clearEmpty();
   const el = document.createElement('div');
@@ -2564,43 +2361,25 @@ function note(text, bad, retry) {
   return el;
 }
 
-/* The model has to mark its claims, since that is how the server knows which
-   excerpts it actually used, but the marks are noise to read: the chips below
-   the answer say the same thing. So they come out at render time, leaving the
-   stored answer intact. */
-/* Models copy the label but not always its brackets: some cite in the
-   lenticular brackets their training uses, or fullwidth ones, with a narrow
-   no-break space inside. Those are the same marks and come out the same way. */
+/* marks strip at render time; the stored answer keeps what the model wrote */
+/* some models use lenticular or fullwidth brackets with narrow spaces; treat them the same */
 const OPEN_MARK = '[\\[\\u3010\\u3014\\u3016\\uFF3B]';
 const CLOSE_MARK = '[\\]\\u3011\\u3015\\u3017\\uFF3D]';
-// Neither kind of bracket may sit inside a mark. With only the closing ones
-// here, `\[ [notes.pdf, line 3] \]` matched from the maths' own bracket and took
-// it along with the citation, leaving `\ \]` behind as text.
 const NOT_CLOSE = '[^\\[\\]\\u3010\\u3011\\u3014\\u3015\\u3016\\u3017\\uFF3B\\uFF3D\\n]';
 const CITED_FILE = new RegExp(
-  // A bracket straight after a backslash opens maths, never a citation.
   '\\s*(?<!\\\\)' + OPEN_MARK + NOT_CLOSE +
   '*\\.(?:pdf|md|markdown|txt|csv|json|docx?|pptx?|png|jpe?g|webp|gif|mp[34]|wav|mov)' +
   NOT_CLOSE + '*' + CLOSE_MARK + '(?!\\()', 'gi');
 
-/* A mark that dropped its file name, `[lines 9-13]` or `[p. 4]`, because the
-   model had named the file once already. Still a citation, still noise in the
-   prose, and recognisable by the locator alone. Stripping happens before the
-   maths is found, so a mark the model put inside a formula goes too. */
 const LOCATOR_MARK = new RegExp(
   '\\s*' + OPEN_MARK + '\\s*(?:lines?|ll?\\.|pp?\\.|pages?)\\s*\\d+' +
   '(?:\\s*[-,\\u2010-\\u2015\\u2212]\\s*\\d+)*\\s*' + CLOSE_MARK + '(?!\\()', 'gi');
 
-/* A line that is only a note of where something came from, "[Source:
-   definition of subset]". The chips under the answer say which files it drew
-   on, so the note is noise in the prose, the same as a citation mark. */
 const SOURCE_NOTE =
   /^[ \t]*[\[【［]\s*sources?\s*:[^\]】］\n]*[\]】］][ \t]*$/gim;
 
 const escapeRegex = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/* A label as the server knows it, `[file, line 2]`, in any of those bracket
-   shapes and with any kind of space between its words. */
 function labelMark(label) {
   const words = label.slice(1, -1).trim().split(/\s+/).map(escapeRegex);
   return new RegExp('\\s*' + OPEN_MARK + '\\s*' + words.join('\\s+') + '\\s*' + CLOSE_MARK, 'g');
@@ -2610,7 +2389,6 @@ function stripCitations(text, citations = []) {
   let out = text;
   for (const c of citations) {
     if (!c.label) continue;
-    // Labels first, so nothing depends on the shape of a file name.
     out = out.replace(labelMark(c.label), '');
   }
   return out.replace(CITED_FILE, '').replace(LOCATOR_MARK, '').replace(SOURCE_NOTE, '').replace(/[ \t  ]+([.,;:])/g, '$1');
@@ -2648,7 +2426,6 @@ function actionButton(icon, label) {
   return b;
 }
 
-/* How long ago, in the shape a person would say it. */
 function timeAgo(iso) {
   const then = Date.parse(iso);
   if (!then) return '';
@@ -2666,8 +2443,7 @@ function timeAgo(iso) {
   return step(Math.round(months / 12), 'year');
 }
 
-/* The clipboard API needs a secure context and a permission; when it is not
-   there, the selection trick still is. */
+/* clipboard needs a secure context; fall back to the old selection trick */
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -2694,11 +2470,9 @@ function turnActions(el, res) {
   when.className = 'when';
   when.textContent = timeAgo(stamp);
   when.title = new Date(stamp).toLocaleString();
-  // A turn that has been on screen a while should not still read "just now".
   box.addEventListener('mouseenter', () => { when.textContent = timeAgo(stamp); });
   box.append(when);
 
-  // What the answer says, without the citation marks the chips already cover.
   const copy = actionButton('copy', 'Copy');
   copy.onclick = async () => {
     const ok = await copyText(stripCitations(res.answer || '', res.citations));
@@ -2713,9 +2487,6 @@ function turnActions(el, res) {
   };
   box.append(copy);
 
-  /* Retrying rewrites the transcript, so it needs a stored turn to rewrite.
-     A compacted turn is already folded into a summary that would no longer
-     match, so it stays as it is. */
   if (res.message_id && !res.compacted) {
     const again = actionButton('retry', 'Ask this question again');
     again.onclick = () => retryTurn(el, res.message_id);
@@ -2724,8 +2495,6 @@ function turnActions(el, res) {
   return box;
 }
 
-/* Copy the question, ask a changed version of it, or take it back. The bar
-   only appears once the turn is stored, which is when it can be acted on. */
 function attachUserActions(el, message) {
   if (!message.message_id || el.querySelector('.msg-actions')) return;
   const box = document.createElement('div');
@@ -2754,8 +2523,6 @@ function attachUserActions(el, message) {
   el.append(box);
 }
 
-/* Editing happens where the question is, not in the composer at the bottom:
-   the bubble becomes a box with the text in it, Enter sends, Escape cancels. */
 function editTurn(el, message) {
   if (el.querySelector('.editor')) return;
   const bubble = el.querySelector('.bubble');
@@ -2808,23 +2575,16 @@ function editTurn(el, message) {
   area.setSelectionRange(area.value.length, area.value.length);
 }
 
-/* Taking a question back leaves no answer to it, so the text goes back in the
-   composer: an undo should hand you what you had, not swallow it. */
 async function undoTurn(el, message) {
   if (!await unask(el, message, 'Take this question back?')) return;
   if (!q.value.trim()) {
     q.value = message.text;
     q.dispatchEvent(new Event('input'));
     q.focus();
-    // And its files back above the composer, the way they were before sending.
     attachSources(fileIds(message.files));
   }
 }
 
-/* What edit, undo and retry all do first: take the exchange out of the stored
-   conversation and off the thread. The answer to this question goes without
-   asking, since replacing it is the point; anything said after it is a
-   different matter and gets a confirmation naming how much. */
 async function unask(el, message, title) {
   if (composer.busy) {
     note('Wait for the current answer to finish first.');
@@ -2855,7 +2615,6 @@ async function unask(el, message, title) {
   return true;
 }
 
-/* This turn and everything after it comes off the thread. */
 function removeFrom(el) {
   for (let n = el; n; ) {
     const next = n.nextElementSibling;
@@ -2865,7 +2624,6 @@ function removeFrom(el) {
   emptyState();
 }
 
-/* The question behind an answer, which is the turn the retry replaces. */
 function priorQuestion(el) {
   let node = el.previousElementSibling;
   while (node && !node.classList.contains('user')) node = node.previousElementSibling;
@@ -2875,7 +2633,6 @@ function priorQuestion(el) {
 async function retryTurn(el, messageId) {
   if (composer.busy) return note('Wait for the current answer to finish first.');
 
-  // Everything after this answer was said in reply to it, so it cannot stay.
   let following = 0;
   for (let n = el.nextElementSibling; n; n = n.nextElementSibling) {
     if (n.classList.contains('turn')) following++;
@@ -2895,8 +2652,6 @@ async function retryTurn(el, messageId) {
     return note(e.message, true);
   }
 
-  // The question goes back on the thread with a fresh answer, so the old pair
-  // and anything after it comes off first.
   removeFrom(priorQuestion(el) || el);
   loadChats();
   runTurn(res.message, fileIds(res.attachments));
@@ -2906,13 +2661,9 @@ function finishTurn(el, res) {
   const seconds = el.elapsed ? el.elapsed() : 0;
   stopTimer(el);
   el.querySelector('.thinking')?.remove();
-  // The steps it took, folded, as stored. An answer from before traces were
-  // kept still has its reasoning, which becomes a single step.
   const steps = res.trace ?? (res.thinking
     ? [{ kind: 'thinking', text: res.thinking, ms: res.thinking_ms }] : null);
   if (steps) drawTrace(el, steps);
-  // A turn can still end with nothing to show, a small model that works and
-  // then stops. Say so where the answer would be, rather than show a blank.
   el.querySelector('.body').innerHTML = (res.answer || '').trim()
     ? markdown(stripCitations(res.answer, res.citations))
     : '<p class="no-answer">No answer came back: the model stopped after working ' +
@@ -2921,17 +2672,13 @@ function finishTurn(el, res) {
   const meta = document.createElement('div');
   meta.className = 'meta-line';
   const model = document.createElement('span');
-  // Citations are only the excerpts the answer actually used, so say when a
-  // search happened and none of it was cited.
+  // only the excerpts the answer actually used are cited
   const searched = res.excerpts_searched && !(res.citations || []).length
     ? `, ${res.excerpts_searched} excerpts searched` : '';
-  // What it did on the way is in the trace above the answer, not repeated here.
   model.textContent = res.model_display_name +
     (res.effort && res.effort !== 'off' ? `, ${res.effort} effort` : '') +
     (seconds ? `, ${seconds}s` : '') + searched;
   meta.append(model);
-  // One chip per file, not per excerpt: the lines it drew on are on the
-  // tooltip, and clicking opens the file at the first of them.
   const byFile = new Map();
   for (const c of res.citations || []) {
     const entry = byFile.get(c.source_id) ||
@@ -2990,13 +2737,10 @@ q.addEventListener('keydown', e => {
   }
   if (e.key !== 'Enter' || e.shiftKey) return;
   e.preventDefault();
-  // Ctrl or Cmd with Enter steers: stop what is running and ask this instead.
   submitInput(e.ctrlKey || e.metaKey);
 });
 $('#send').onclick = () => composer.busy ? stopTurn() : submitInput(false);
 
-/* One turn at a time. Anything typed while a turn is running is queued and sent
-   when it finishes, unless it is steered, which stops the run and jumps ahead. */
 const composer = { busy: false, controller: null, queue: [] };
 
 function setBusy(on) {
@@ -3012,8 +2756,6 @@ function submitInput(steerNow) {
   if (!text) return;
   q.value = ''; q.style.height = 'auto';
 
-  // The attached files go with this question, queued or not, and the composer
-  // is clear for the next one.
   const files = [...state.attached];
   state.attached = [];
   renderAttachments();
@@ -3063,9 +2805,7 @@ function renderQueue() {
   }
 }
 
-/* Aborting the fetch closes the connection, and axum drops the handler with it,
-   which cancels the call out to the provider. Nothing was persisted yet either,
-   so a stopped exchange leaves no trace in the conversation. */
+/* aborting the fetch drops the axum handler and cancels the provider call */
 function stopTurn() {
   composer.controller?.abort();
 }
@@ -3085,8 +2825,6 @@ async function runTurn(text, files = []) {
   turn.classList.add('live');
   const thinking = turn.querySelector('.thinking');
   const bodyEl = turn.querySelector('.body');
-  // The steps being written right now: a stretch of reasoning still arriving,
-  // or a tool call still running. Whatever comes next closes them.
   let thinkingStep = null, toolStep = null;
   const closeThought = () => {
     if (!thinkingStep) return;
@@ -3096,8 +2834,7 @@ async function runTurn(text, files = []) {
     thinkingStep = null;
   };
 
-  // Tokens render as they arrive, throttled so a fast model does not re-lay
-  // out the page per word. Citations strip at the end, when they are known.
+  // tokens render as they arrive, throttled so a fast model does not re-lay the page per word
   let pending = '';
   let lastRender = 0, renderTimer = 0;
   const nearBottom = () =>
@@ -3118,9 +2855,6 @@ async function runTurn(text, files = []) {
   const fail = e => {
     stopTimer(turn);
     turn.remove();
-    // A failed turn was never persisted, so trying again is simply asking it
-    // again: the question and the failure come off the thread and the same
-    // text goes back through, model, sources and all.
     note(e.message, true, el => {
       if (composer.busy) return note('Wait for the current answer to finish first.');
       el.remove();
@@ -3164,7 +2898,6 @@ async function runTurn(text, files = []) {
         for (const line of raw.split('\n')) {
           if (line.startsWith('event:')) event = line.slice(6).trim();
           else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
-          // Anything else is a keep-alive comment.
         }
         if (!data.length) continue;
         let msg;
@@ -3176,20 +2909,16 @@ async function runTurn(text, files = []) {
         if (event === 'token') {
           pending += msg.t || '';
           thinking?.remove();
-          // The answer has started, so the reasoning before it folds away.
           closeThought();
           scheduleRender();
         } else if (event === 'thinking') {
           thinking?.remove();
           if (!thinkingStep) {
-            // A new stretch: after a tool call it is a new line, not more of
-            // the last one.
             thinkingStep = addStep(turn, 'Thinking…', { live: true });
             thinkingStep.classList.add('thought', 'open');
             thinkingStep.dataset.since = Date.now();
           }
           const detail = thinkingStep.querySelector('.detail');
-          // Follow the newest thought, unless the reader has scrolled up in it.
           const following = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 24;
           setDetail(thinkingStep, msg.t || '', { append: true });
           if (following) detail.scrollTop = detail.scrollHeight;
@@ -3216,8 +2945,6 @@ async function runTurn(text, files = []) {
           turn.classList.remove('live');
           attachUserActions(asked, { message_id: msg.user_message_id, text, files });
           closeThought();
-          // finishTurn redraws the trace from what the server stored, so the
-          // finished turn reads exactly as it will when reopened.
           finishTurn(turn, msg);
           loadChats();
         } else if (event === 'error') {
@@ -3262,15 +2989,9 @@ $('#searchBtn').onclick = async () => {
   el.scrollIntoView({ block: 'end' });
 };
 
-/* ------------------------------------------------------ conversations */
 const LAST_CHAT_KEY = 'notebook.conversation';
-// Each vault remembers its own last conversation, so switching back to one
-// lands where you left it.
 const lastChatKey = () => LAST_CHAT_KEY + (state.vault ? '.' + state.vault.id : '');
 
-/* The address bar is the permalink: /c/<id> for a conversation, / for a fresh
-   one. History entries mean back and forward walk the conversations too. The
-   path the browser shows carries the deployment's prefix; the routes do not. */
 function appPath() {
   const path = location.pathname;
   return (BASE && path.startsWith(BASE)) ? path.slice(BASE.length) || '/' : path;
@@ -3382,21 +3103,17 @@ function newConversation({ fromHistory = false } = {}) {
 }
 $('#newChatBtn').onclick = newConversation;
 
-/* Reopening a conversation redraws the whole transcript, compacted turns
-   included, with a divider marking where the context was folded away. */
 async function openConversation(id, { fromHistory = false } = {}) {
   let data;
   try {
     data = await api('/api/conversations/' + id);
   } catch (e) {
-    // A stale link or a deleted conversation should not strand the page.
     localStorage.removeItem(lastChatKey());
     if (conversationFromUrl() === id) setUrl(null, { replace: true });
     note('That conversation is gone: ' + e.message, true);
     return false;
   }
-  // A conversation searches the vault it was started in, so opening one from
-  // another vault (a pasted link, the back button) opens that vault too.
+  // a conversation searches the vault it was started in, so opening one opens that vault
   const vaultId = data.conversation.vault_id;
   if (vaultId && vaultId !== state.vault?.id) await openVault(vaultId, { keepConversation: true });
 
@@ -3436,7 +3153,6 @@ async function openConversation(id, { fromHistory = false } = {}) {
   if (data.conversation.summary && !dividerDrawn) drawDivider('context compacted');
   if (!data.messages.length) emptyState();
 
-  // The meter shows what the last turn actually cost, not zero.
   state.context = {
     used: data.context_used || 0,
     window: state.activeModel?.context_window || 0,
@@ -3453,7 +3169,6 @@ function drawDivider(text) {
   $('#thread').append(el);
 }
 
-/* ------------------------------------------------------------ commands */
 const COMMANDS = [
   {
     name: 'compact',
@@ -3512,7 +3227,6 @@ function runCommand(cmd) {
   cmd.run();
 }
 
-/* --------------------------------------------------------- prompt bar */
 function togglePop(id) {
   for (const p of document.querySelectorAll('.pop'))
     p.hidden = p.id === id ? !p.hidden : true;
@@ -3633,10 +3347,6 @@ async function loadSettings() {
   renderBar(); renderEffort();
 }
 
-/* ------------------------------------------------------------- vaults */
-/* A vault is a separate library: its own sources, folders and chats. One is
-   open at a time; the rail, the chat list and a new conversation all follow
-   it, and nothing selected, attached or open carries across a switch. */
 const VAULT_ICON = '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" ' +
   'stroke="currentColor" stroke-width="1.3"><rect x="2.3" y="2.3" width="11.4" height="11.4" rx="1.6"/>' +
   '<circle cx="8" cy="8" r="2.3"/><path d="M8 4.2v1.5M8 10.3v1.5M4.2 8h1.5M10.3 8h1.5"/></svg>';
@@ -3674,7 +3384,7 @@ async function openVault(id, { keepConversation = false } = {}) {
 }
 
 $('#vaultBtn').onclick = e => {
-  // The document handler closes pops on any click outside one.
+  // the document click handler closes pops on any outside click
   e.stopPropagation();
   renderVaultPop();
   togglePop('vaultPop');
@@ -3783,7 +3493,6 @@ async function deleteVault(vault) {
     return say(e.message, 'Could not delete that vault');
   }
   const wasOpen = vault.id === state.vault?.id;
-  // Listing again settles which vault is open when the open one just went.
   await loadVaults();
   if (wasOpen) await openVault(state.vault.id);
   renderVaultManager();
@@ -3829,9 +3538,6 @@ async function moveFolderToVault(folder) {
   loadVaults();
 }
 
-/* ----------------------------------------------------------- settings */
-/* One place for what can be set. Tabs on the left, content on the right;
-   Configure stays the place for providers and the full model table. */
 const SETTINGS_TABS = [
   { id: 'general', label: 'General', group: 'Settings',
     icon: '<path d="M2 5.5h12M2 10.5h12"/><circle cx="10.5" cy="5.5" r="1.7"/><circle cx="5.5" cy="10.5" r="1.7"/>' },
@@ -3894,7 +3600,6 @@ async function renderSettings() {
 async function renderGeneral(body) {
   const [{ models }, settings] = await Promise.all([api('/api/models'), api('/api/settings')]);
   state.settings = settings;
-  // Pinned first, since those are the ones in use.
   const order = [...models].sort((a, b) => Number(b.pinned) - Number(a.pinned));
   const seeing = order.filter(m => m.supports_vision);
   body.innerHTML = `
@@ -4030,8 +3735,7 @@ async function renderAccount(body) {
   }
 }
 
-/* The role's current model is always an option, even when it is hidden or
-   cannot see, so the select never claims a model that is not the one in use. */
+/* the role's current model is always offered, even hidden or non vision */
 function fillModelSelect(select, models, current) {
   select.innerHTML = '';
   const label = m => `${m.display_name} (${m.provider_name})`;
@@ -4048,12 +3752,10 @@ async function saveSetting(patch) {
   } catch (e) {
     say(e.message, 'Could not save that');
   }
-  // The prompt bar shows the researcher and the effort, so it follows.
   await loadSettings();
   renderSettings();
 }
 
-/* ---------------------------------------------------------- configure */
 function openConfigure() { $('#configure').hidden = false; loadConfigure(); }
 $('#closeConfig').onclick = () => { $('#configure').hidden = true; loadSettings(); };
 $('#modelSearch').oninput = renderModelTable;
@@ -4168,9 +3870,6 @@ function renderModelTable() {
   }
 }
 
-/* Endpoints that list nothing (DeepSeek's Anthropic-style API lists no models
-   at all, and preview ids are often missing from the ones that do) still have
-   to be usable, so a model can be typed in and corrected by hand. */
 function modelFields(model) {
   const providers = state.providers.map(p => ({ value: p.id, label: p.name }));
   const fields = [];
@@ -4226,7 +3925,6 @@ async function editModelDialog(model) {
   const values = await askFields(`Edit ${model.display_name}`, '', modelFields(model));
   if (!values) return;
 
-  // Blank numbers mean "leave it alone", so absent keys are sent as they are.
   const patch = {
     model_id: values.model_id,
     display_name: values.display_name || model.model_id,
@@ -4289,7 +3987,6 @@ function renderProviderTable() {
   }
 }
 
-/* ----------------------------------------------------- provider form */
 $('#addProviderBtn').onclick = async e => {
   e.stopPropagation();
   const menu = $('#presetMenu');

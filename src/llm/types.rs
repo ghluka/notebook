@@ -1,8 +1,4 @@
-//! Provider-neutral chat types.
-//!
-//! Handlers and agents only ever speak this vocabulary; `openai.rs` and
-//! `anthropic.rs` translate it to and from the wire. If a provider needs
-//! something that isn't modelled here, extend these types first.
+//! provider-neutral chat types; extend here before touching provider json.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,52 +11,39 @@ pub enum Role {
     Tool,
 }
 
-/// One piece of a message. A message is a sequence of these so that a single
-/// user turn can carry "here is a page image, here is the question about it".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentPart {
     Text {
         text: String,
     },
-    /// Base64 image bytes. `media_type` is e.g. `image/png`.
     Image {
         media_type: String,
         data: String,
     },
-    /// Base64 document bytes (PDF today). Providers that can't take documents
-    /// natively will error rather than silently drop it.
     Document {
         media_type: String,
         data: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filename: Option<String>,
     },
-    /// Base64 audio bytes, e.g. `audio/wav`. OpenAI-style endpoints send this
-    /// as `audio_url` with a data URI (the Nemotron Omni syntax); Anthropic
-    /// has no audio input and errors rather than silently dropping it.
+    /// openai-style sends audio_url as a data URI (nemotron omni); anthropic errors
     Audio {
         media_type: String,
         data: String,
     },
-    /// Base64 video bytes, e.g. `video/mp4`. OpenAI-style endpoints send this
-    /// as `video_url` with a data URI; Anthropic errors.
     Video {
         media_type: String,
         data: String,
     },
-    /// A model's request to call a tool.
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
-        /// Opaque provider state that has to travel back with the call.
-        /// Gemini's thinking models sign every function call and reject a
-        /// history that hands one back without its signature.
+        /// opaque provider state; gemini signs every call and rejects history without it
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
-    /// Our answer to a `ToolUse`.
     ToolResult {
         tool_use_id: String,
         content: String,
@@ -90,12 +73,10 @@ impl Message {
         Message { role: Role::Assistant, content: vec![ContentPart::text(text)] }
     }
 
-    /// A turn carrying results for tools the model just called.
     pub fn tool_results(results: Vec<ContentPart>) -> Self {
         Message { role: Role::Tool, content: results }
     }
 
-    /// All text parts joined, which is what you want for a plain answer.
     pub fn text(&self) -> String {
         self.content
             .iter()
@@ -108,7 +89,6 @@ impl Message {
     }
 }
 
-/// A tool the model may call. `parameters` is a JSON Schema object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tool {
     pub name: String,
@@ -121,14 +101,11 @@ pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: serde_json::Value,
-    /// See `ContentPart::ToolUse::signature`. `None` for providers that don't
-    /// sign their calls, which is all of them but Gemini.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
 }
 
-/// How hard the model should think before answering. Mapped per provider:
-/// Anthropic gets a thinking budget, OpenAI gets `reasoning_effort`.
+/// mapped per provider: anthropic gets a thinking budget, openai reasoning_effort
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
@@ -159,7 +136,6 @@ impl Effort {
         }
     }
 
-    /// Anthropic thinking budget in tokens.
     pub fn budget_tokens(self) -> Option<u32> {
         match self {
             Effort::Off => None,
@@ -227,9 +203,8 @@ pub struct Usage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
-    /// Concatenated text output. Empty when the model only called tools.
+    /// empty when the model only called tools
     pub text: String,
-    /// Reasoning the model exposed, when thinking was enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -240,7 +215,6 @@ pub struct ChatResponse {
 }
 
 impl ChatResponse {
-    /// The assistant turn to append to history before running tools.
     pub fn as_message(&self) -> Message {
         let mut content = Vec::new();
         if !self.text.is_empty() {
@@ -258,13 +232,7 @@ impl ChatResponse {
     }
 }
 
-/// One piece of a streamed answer. Text arrives as it is generated; `Done`
-/// closes the turn with the tool calls and usage alongside it. Providers only
-/// ever yield text through `Text`, never smuggled inside `Done`.
-///
-/// `Thinking` is the model's reasoning, on providers that expose it. It comes
-/// before the answer on a channel of its own and is never part of the answer
-/// text: shown to the person while they wait, and not sent back to the model.
+/// thinking is shown while waiting, never part of answer text, never sent back to the model
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
     Thinking(String),
@@ -272,7 +240,6 @@ pub enum StreamEvent {
     Done(StreamDone),
 }
 
-/// Everything a streamed turn accumulated besides its prose.
 #[derive(Debug, Clone, Default)]
 pub struct StreamDone {
     pub tool_calls: Vec<ToolCall>,

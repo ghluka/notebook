@@ -1,15 +1,4 @@
-//! Ingestion: original bytes → markdown-latex rendition → chunks.
-//!
-//! Text and markdown need no model at all. PDFs take one of two paths: when
-//! the file carries a usable text layer (FlateDecode and ASCII85 streams are
-//! decompressed, image streams are skipped), the whole layer goes to the
-//! analyzer model as text for structuring, and any model will do. Scanned
-//! PDFs with no text layer go to a vision-capable model as a native document.
-//! Images, audio and video always go to the analyzer model directly: images
-//! as image parts, audio and video as `audio_url` / `video_url` parts (the
-//! OpenAI-style omni syntax). When the endpoint cannot read the file and no
-//! text layer exists, ingestion fails with an honest error instead of storing
-//! a guess.
+//! Ingestion: bytes to markdown rendition to chunks.
 
 pub mod sniff;
 pub mod text;
@@ -19,7 +8,6 @@ use crate::db::{self, Source};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-/// What the analyzer needs to know to pick a strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Text,
@@ -27,7 +15,6 @@ pub enum Kind {
     Image,
     Audio,
     Video,
-    /// Constructed by URL ingestion (phase 4).
     #[allow(dead_code)]
     Url,
 }
@@ -45,8 +32,7 @@ impl Kind {
     }
 
     pub fn from_media_type(media_type: &str, filename: Option<&str>) -> Kind {
-        // The extension wins when present, since uploads often arrive as
-        // `application/octet-stream`.
+        // extension wins: octet-stream uploads carry no usable media type
         if let Some(name) = filename {
             let ext = name.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
             match ext.as_str() {
@@ -79,12 +65,6 @@ impl Kind {
     }
 }
 
-/// Text as a person would read it, whatever it was saved as.
-///
-/// UTF-8 is nearly everything, but a file that carries a UTF-16 byte order mark
-/// would otherwise be indexed as every second character being a NUL, and one
-/// written in an older single byte encoding would lose its accents. Both are
-/// still someone's notes.
 pub fn decode_text(bytes: &[u8]) -> String {
     match sniff::text_bom(bytes) {
         Some("text/plain") => String::from_utf8_lossy(&bytes[3..]).into_owned(),
@@ -102,20 +82,12 @@ pub fn decode_text(bytes: &[u8]) -> String {
         }
         None => match std::str::from_utf8(bytes) {
             Ok(text) => text.to_string(),
-            // Not UTF-8, and `sniff` already said it reads as text, so it is an
-            // older single byte encoding: Latin-1 maps straight onto codepoints.
+            // sniff already said this reads as text, so treat it as latin-1
             Err(_) => bytes.iter().map(|&b| b as char).collect(),
         },
     }
 }
 
-/// What a file is, decided by its bytes rather than by its name.
-///
-/// The declared media type and the extension are claims made by whoever
-/// uploaded the file, and they are wrong often enough to matter: an mp3 renamed
-/// to `.pdf` would otherwise be rasterized as a document, fail, and cost a model
-/// call to say so. The bytes decide; the name only fills in the finer label
-/// (`text/markdown` rather than `text/plain`) once the bytes agree it is text.
 pub fn identify(
     bytes: &[u8],
     filename: Option<&str>,
@@ -131,8 +103,7 @@ pub fn identify(
         )));
     };
 
-    // For text, a name that says `text/markdown` or `text/csv` is more precise
-    // than the bytes can be, so it wins. For everything else the bytes win.
+    // for text a name like text/csv is more precise than the bytes
     let media_type = if kind == Kind::Text {
         let named = declared
             .filter(|m| m.starts_with("text/") || *m == "application/json")
@@ -162,12 +133,6 @@ pub fn identify(
     Ok((kind, media_type))
 }
 
-/// One provider call with the retry schedule applied.
-///
-/// A rate limit that outlives the schedule becomes `AppError::RateLimited`,
-/// carrying the model it happened on, so the client can offer to switch models
-/// instead of being told the file is unreadable. Everything else passes through
-/// unchanged.
 async fn analyzer_chat(
     state: &AppState,
     resolved: &crate::models::Resolved,
@@ -190,10 +155,7 @@ async fn analyzer_chat(
     }
 }
 
-/// Why a reply came back with no text. "Returned no text" alone sends people
-/// looking for a model that can see, when the usual cause is a model spending
-/// its whole output budget on reasoning, which a lower effort or a larger
-/// output limit fixes and a different model may not.
+// "returned no text" hides the usual cause: budget spent on reasoning
 fn empty_reply(model: &str, response: &crate::llm::ChatResponse) -> String {
     let reasoned = response.thinking.as_deref().is_some_and(|t| !t.trim().is_empty());
     match response.stop_reason.as_str() {
@@ -209,9 +171,7 @@ fn empty_reply(model: &str, response: &crate::llm::ChatResponse) -> String {
     }
 }
 
-/// The thinking effort for an analyzer call. The prompt bar's effort is chosen
-/// for the researcher; a model not tagged thinking is sent none, so a high
-/// setting there does not turn every transcription into a reasoning run.
+// the prompt bar effort is the researcher's; do not leak it into transcription
 async fn analyzer_effort(
     state: &AppState,
     resolved: &crate::models::Resolved,
@@ -222,8 +182,6 @@ async fn analyzer_effort(
     Ok(crate::models::effort(&state.db, &state.user_id).await?)
 }
 
-/// Which model does the analyzing. `override_id` comes from a client retrying
-/// after a rate limit with a different model picked by hand.
 async fn analyzer_model(
     state: &AppState,
     override_id: Option<&str>,
@@ -238,21 +196,16 @@ async fn analyzer_model(
     }
 }
 
-/// Analyze one source and persist its rendition. Sets the source status on the
-/// way in and out, so a failure is visible in `GET /api/sources`.
 pub async fn ingest(state: &AppState, source: &Source) -> AppResult<()> {
     ingest_with(state, source, None).await
 }
 
-/// Ingest with an explicit analyzer model, which is how a retry after a rate
-/// limit runs on a different one.
 pub async fn ingest_with(
     state: &AppState,
     source: &Source,
     model_override: Option<&str>,
 ) -> AppResult<()> {
-    // A hand picked model means a deliberate fresh start, so nothing carries
-    // over from the run that failed.
+    // an override means a deliberate fresh start, drop the partial
     if model_override.is_some() {
         db::clear_partial(&state.db, &source.id).await?;
     }
@@ -263,12 +216,7 @@ pub async fn ingest_with(
     match &result {
         Ok(()) => db::set_source_status(&state.db, &source.id, "ready", None).await?,
         Err(e) => {
-            /* A stored rendition that is itself a description of the file is
-               exactly what this run set out to replace, and leaving it behind
-               would keep the notebook answering questions about this file with
-               something a model invented, under a source the explorer already
-               marks failed. A rendition that reads as a real transcription
-               stays: a failed rerun is no reason to throw away good work. */
+            // drop a stored description; a real transcription stays
             if e.is_rendition_failure()
                 && let Ok(Some(stored)) = db::get_document(&state.db, &source.id).await
                 && page_rendition_is_a_summary(&stored.markdown, 1)
@@ -289,12 +237,6 @@ pub async fn ingest_with(
     result
 }
 
-/// Analyze these sources in the background, one at a time.
-///
-/// Uploading and analyzing are separate on purpose: a local file is stored in
-/// milliseconds, while looking at it can take minutes, and tying the two
-/// together meant a page refresh abandoned everything still queued. The work
-/// now outlives the request that started it.
 pub fn spawn_analysis(state: &AppState, sources: Vec<Source>) {
     if sources.is_empty() {
         return;
@@ -302,13 +244,12 @@ pub fn spawn_analysis(state: &AppState, sources: Vec<Source>) {
     let state = state.clone();
     tokio::spawn(async move {
         for source in sources {
-            // One permit, so a dozen files queue up instead of stampeding the
-            // provider. Held across the whole of one source's analysis.
+            // one permit process-wide so a dozen files cannot stampede the provider
             let _slot = match state.analysis.clone().acquire_owned().await {
                 Ok(slot) => slot,
                 Err(_) => return,
             };
-            // The row may have been deleted while it sat in the queue.
+            // row may be gone by the time the queue reaches it
             match db::get_source(&state.db, &source.id).await {
                 Ok(Some(current)) if current.status != "ready" => {
                     if let Err(e) = ingest(&state, &current).await {
@@ -322,7 +263,6 @@ pub fn spawn_analysis(state: &AppState, sources: Vec<Source>) {
     });
 }
 
-/// Pick up anything left `pending` or `analyzing` by a previous run.
 pub async fn resume_pending(state: &AppState) {
     match db::pending_sources(&state.db).await {
         Ok(sources) if !sources.is_empty() => {
@@ -339,8 +279,7 @@ async fn run(
     source: &Source,
     model_override: Option<&str>,
 ) -> AppResult<()> {
-    // Rows stored before the bytes were ever checked, and files whose name
-    // lies, are both settled here: a header is cheap to read and never wrong.
+    // sniff the head, not the row: old rows and lying names both end up here
     let head = state.storage.read_head(&source.storage_path, HEAD_BYTES).await?;
     let kind = match sniff::sniff(&head).kind {
         Some(kind) => kind,
@@ -370,7 +309,6 @@ async fn run(
             analyze_media(state, source, kind, model_override).await?
         }
         Kind::Pdf => analyze_pdf(state, source, model_override).await?,
-        // Constructed by URL ingestion (phase 4).
         Kind::Url => {
             return Err(AppError::Unsupported(
                 "URL ingestion is not implemented yet; upload the file directly".into(),
@@ -394,36 +332,24 @@ async fn run(
     Ok(())
 }
 
-/// Soft per-kind caps, so a huge upload fails with guidance instead of
-/// blowing up the base64 body or the model's context. The hard cap stays in
-/// `MAX_UPLOAD_BYTES`.
 const IMAGE_MAX_BYTES: usize = 20 * 1024 * 1024;
 const PDF_MAX_BYTES: usize = 64 * 1024 * 1024;
 const AUDIO_MAX_BYTES: usize = 100 * 1024 * 1024;
 const VIDEO_MAX_BYTES: usize = 200 * 1024 * 1024;
 
-/// Text is read whole and chunked, so it has a ceiling of its own.
 const TEXT_MAX_BYTES: usize = 32 * 1024 * 1024;
-/// A PDF claiming more pages than any real document has is broken or hostile.
-/// Refusing loudly beats spending a day of model calls on a generated file.
+// a claimed million pages is broken or hostile; every page is a model call
 const PDF_MAX_PAGES: usize = 5_000;
-/// A decompression bomb is a small file that claims to be enormous: a few
-/// hundred kilobytes of PNG can unpack to a gigabyte of pixels. The header
-/// says how big it intends to be, which is enough to turn it away.
+// header pixel count catches a decompression bomb before decode
 const IMAGE_MAX_PIXELS: u64 = 120_000_000;
-/// How many bytes of a file are enough to say what it is.
 const HEAD_BYTES: usize = 8 * 1024;
 
-/// What a faithful page transcription runs to, per page, at the very least.
-/// A caption of a whole batch of pages comes in far under this.
+// a caption of a whole batch of pages lands far under this per page
 const MIN_TRANSCRIPT_CHARS_PER_PAGE: usize = 250;
-/// How much of an extracted text layer a structured rendition should still
-/// carry. Losing more than this means it was summarised, not transcribed.
+// below this share of the input it was summarised, not transcribed
 const MIN_TEXT_LAYER_KEPT_PERCENT: usize = 40;
 
-/// How much extracted PDF text counts as a real text layer.
 const PDF_TEXT_SUBSTANTIAL: usize = 500;
-/// Cap on extracted text sent to the model for structuring.
 const PDF_TEXT_INPUT_MAX: usize = 100_000;
 
 fn prompt_for(kind: Kind) -> &'static str {
@@ -467,10 +393,6 @@ fn prompt_for(kind: Kind) -> &'static str {
     }
 }
 
-/// A page count no real document has. Generated files can claim millions of
-/// pages, and every page is a model call, so this refuses rather than settling
-/// in for a week of work. It is a refusal, not a silent truncation: a document
-/// that is analyzed at all is analyzed in full.
 fn check_page_budget(total_pages: usize) -> AppResult<()> {
     if total_pages > PDF_MAX_PAGES {
         return Err(AppError::Unsupported(format!(
@@ -480,17 +402,7 @@ fn check_page_budget(total_pages: usize) -> AppResult<()> {
     Ok(())
 }
 
-/// Whether a rendition transcribes the pages or merely talks about them.
-///
-/// A small model handed page images will often answer with a caption: "The PDF
-/// contains the 2026 Fall timetable for a university, listing various courses".
-/// Fluent, wrong in the details, and useless as a rendition, since the notebook
-/// then indexes a description of the document instead of the document. Storing
-/// that is worse than failing, because the researcher will quote it.
-///
-/// Three things separate the two. A transcription follows the `## p. N` shape it
-/// was asked for; it does not open by naming the artefact it came from; and it
-/// runs to roughly the length of the pages it covers.
+// a caption describes the file; storing one is worse than failing
 fn page_rendition_is_a_summary(rendition: &str, pages: usize) -> bool {
     let body = rendition.trim();
     if body.is_empty() {
@@ -505,8 +417,7 @@ fn page_rendition_is_a_summary(rendition: &str, pages: usize) -> bool {
     body.chars().count() < MIN_TRANSCRIPT_CHARS_PER_PAGE * pages.max(1)
 }
 
-/// The same question for a rendition built from an extracted text layer, where
-/// the input is known: a transcription keeps most of what it was given.
+// input is known here, so dropping most of it means it was summarised
 fn text_rendition_is_a_summary(rendition: &str, extracted: &str) -> bool {
     let kept = rendition.trim().chars().count();
     if kept == 0 {
@@ -519,8 +430,6 @@ fn text_rendition_is_a_summary(rendition: &str, extracted: &str) -> bool {
     given > 0 && kept * 100 < given * MIN_TEXT_LAYER_KEPT_PERCENT
 }
 
-/// `## p. 4`, `### Page 4`, and the other shapes a model reaches for when it is
-/// transcribing page by page as asked.
 fn has_page_headers(body: &str) -> bool {
     body.lines().any(|line| {
         let line = line.trim_start();
@@ -535,8 +444,7 @@ fn has_page_headers(body: &str) -> bool {
     })
 }
 
-/// An answer that begins by naming the thing it was given is describing it.
-/// Nobody's page begins "This PDF contains".
+// nobody's page begins "This PDF contains"
 fn opens_by_describing(body: &str) -> bool {
     let opening: String = body
         .chars()
@@ -564,11 +472,7 @@ fn opens_by_describing(body: &str) -> bool {
     })
 }
 
-/// What to say when the endpoint refuses the kind of content outright.
-///
-/// This is a configuration problem, not a file problem, and the fix is exact:
-/// the model is marked as taking images and does not. Say which model, quote
-/// what the endpoint said, and name both ways out.
+// endpoint refused the content kind: that is a config problem, not a file one
 fn modality_error(resolved: &crate::models::Resolved, media: &str, cause: &AppError) -> AppError {
     let model = &resolved.model.display_name;
     let said = cause.provider_message();
@@ -585,8 +489,7 @@ fn modality_error(resolved: &crate::models::Resolved, media: &str, cause: &AppEr
     }
 }
 
-/// What to say when the model will not transcribe. Every other path asks the
-/// same model, so the answer is a different model, not a different prompt.
+// a refusal carries over to every other path, so the fix is another model
 fn summarised_error(model: &str, what: &str) -> AppError {
     AppError::Rendition(format!(
         "the analyzer model {model} answered with a description of {what} rather than \
@@ -596,8 +499,6 @@ fn summarised_error(model: &str, what: &str) -> AppError {
     ))
 }
 
-/// Images, audio and video: the analyzer model looks at the original bytes.
-/// Audio and video need an omni-style model on an OpenAI-style endpoint.
 async fn analyze_media(
     state: &AppState,
     source: &Source,
@@ -623,7 +524,7 @@ async fn analyze_media(
         )));
     }
 
-    // A small file is not a small image. Ask the header what it unpacks to.
+    // a small file is not a small image: ask the header what it unpacks to
     if kind == Kind::Image
         && let Some((w, h)) = sniff::image_dimensions(&bytes)
         && w.saturating_mul(h) > IMAGE_MAX_PIXELS
@@ -675,8 +576,7 @@ async fn analyze_media(
     let text = analyzer_chat(state, &resolved, &req, &format!(" on this {} file", kind.as_str()))
         .await
         .map_err(|e| {
-            // An omni model is not the default anywhere, and "unknown variant
-            // `audio_url`" tells a person nothing about what to do next.
+            // "unknown variant audio_url" tells a person nothing to do next
             if e.is_modality_refusal() {
                 modality_error(&resolved, &format!("{} files", kind.as_str()), &e)
             } else {
@@ -693,22 +593,9 @@ async fn analyze_media(
     Ok((text, Some(resolved.model.model_id.clone())))
 }
 
-/// PDFs take up to three paths, in order. Page images first: they capture text
-/// and figures uniformly and are accepted by every endpoint, including ones
-/// that reject native documents. Then the native document, for render failures.
-/// Then the text layer alone. Junk extraction is never fed to a model, so a
-/// failure stays a visible error instead of becoming a fluent fiction.
-///
-/// Page images per request. One page per request is faithful but far too slow
-/// on local models; four keeps context bounded while staying ordered.
+// four pages per request: one is faithful but too slow, more blows context
 const PAGES_PER_REQUEST: usize = 4;
 
-/// Transcribe a whole PDF from page images, a batch at a time.
-///
-/// Every page is covered, however long the file. The context limit is a limit
-/// per request, not per document, so the document is split across requests and
-/// the pieces are joined back into one rendition. Page numbers in the prompt
-/// are the file's real ones, so a skipped page cannot shift the rest.
 async fn analyze_page_images(
     state: &AppState,
     resolved: &crate::models::Resolved,
@@ -724,8 +611,7 @@ async fn analyze_page_images(
     let mut sections = Vec::new();
     let mut unreadable = Vec::new();
 
-    // Pick up where a previous run stopped. The saved progress counts pages of
-    // this same file, so a resume only makes sense when the totals agree.
+    // resume only when the saved totals match this file
     let mut start = 0;
     if let (Some(partial), Some(progress)) = (&source.partial, &source.progress) {
         if let Some((done, saved_total)) = parse_progress(progress) {
@@ -737,8 +623,7 @@ async fn analyze_page_images(
         }
     }
     while start < total {
-        // Rendered just before it is needed, so a long book never holds more
-        // than one batch of page images in memory.
+        // render each batch right before sending, so memory stays bounded
         let batch = {
             let bytes = bytes.to_vec();
             tokio::task::spawn_blocking(move || {
@@ -751,9 +636,7 @@ async fn analyze_page_images(
         db::set_source_progress(&state.db, &source.id, batch_end as i64, total as i64).await?;
 
         if batch.is_empty() {
-            // Nothing in this slice could be rasterized. If that is true of the
-            // very first slice the file is not renderable at all, and the
-            // caller should try another path.
+            // first slice empty means unrenderable, let the caller try another path
             if start == 0 {
                 return Err(AppError::Unsupported(
                     "no page of this PDF could be rendered to an image".into(),
@@ -802,9 +685,7 @@ async fn analyze_page_images(
         )
         .await
         .map_err(|e| match e {
-            // A rate limit keeps its own shape, and so does a refusal of images
-            // as such: both mean something to the caller, and wrapping them in
-            // prose about page numbers would throw that away and read worse.
+            // keep rate limit and modality errors intact, page prose would hide them
             keep @ AppError::RateLimited { .. } => keep,
             keep if keep.is_modality_refusal() => keep,
             other => AppError::Unsupported(format!(
@@ -817,15 +698,13 @@ async fn analyze_page_images(
                  try a different analyzer model"
             )));
         }
-        // A model that answers with a description of the pages has not
-        // transcribed them, and a description stored as a rendition is worse
-        // than no rendition: it reads as the document and is not.
+        // a description stored as a rendition is worse than none
         if page_rendition_is_a_summary(&text, batch.len()) {
             return Err(summarised_error(&resolved.model.display_name, "these pages"));
         }
         sections.push(text);
         start = batch_end;
-        // Saved after every batch, so a restart costs one batch, not the book.
+        // saved each batch so a restart costs one batch, not the book
         db::save_partial(
             &state.db,
             &source.id,
@@ -847,8 +726,6 @@ async fn analyze_page_images(
     Ok((sections.join("\n\n"), Some(resolved.model.model_id.clone())))
 }
 
-/// Structure a usable text layer into markdown. Works with any model, no
-/// vision needed, and covers the whole file no matter how long.
 async fn structure_text_layer(
     state: &AppState,
     resolved: &crate::models::Resolved,
@@ -898,21 +775,13 @@ async fn structure_text_layer(
                 .into(),
         ));
     }
-    // The input is known here, so a rendition that dropped most of it was a
-    // summary however confidently it reads.
     if text_rendition_is_a_summary(&text, extracted) {
         return Err(summarised_error(&resolved.model.display_name, "this text"));
     }
     Ok((text, Some(resolved.model.model_id.clone())))
 }
 
-/// Structure the text layer, and if the model will not do that either, store
-/// the text layer as it came out of the file.
-///
-/// A plain rendition that is true beats a fluent one that is not: the notebook
-/// can still search it, cite it and show it, and nothing in it was invented.
-/// The note at the top says what happened, so the file is not silently second
-/// rate.
+// a plain true rendition beats a fluent invented one: searchable and honest
 async fn text_layer_fallback(
     state: &AppState,
     resolved: &crate::models::Resolved,
@@ -936,8 +805,6 @@ async fn text_layer_fallback(
     }
 }
 
-/// Send the document natively. Some endpoints take this; others reject the
-/// part outright, and the caller decides what that means.
 async fn analyze_native_document(
     state: &AppState,
     resolved: &crate::models::Resolved,
@@ -1016,7 +883,7 @@ async fn analyze_pdf(
 
     let resolved = match analyzer_model(state, model_override).await? {
         Some(r) => r,
-        // No model configured, but the text layer is already the rendition.
+        // no model, but the text layer already is the rendition
         None if has_text => return Ok((extracted, None)),
         None => {
             return Err(AppError::Unsupported(
@@ -1036,7 +903,7 @@ async fn analyze_pdf(
     }
 
     if resolved.model.supports_vision {
-        // Page images first: text and figures together, accepted everywhere.
+        // page images first: text and figures together, accepted everywhere
         let total_pages = tokio::task::spawn_blocking({
             let bytes = bytes.clone();
             move || render::page_count(&bytes)
@@ -1049,12 +916,9 @@ async fn analyze_pdf(
                 .await
             {
                 Ok(done) => return Ok(done),
-                // Every remaining path calls the same endpoint, so a provider
-                // that is out of capacity would only fail again, more slowly,
-                // and end up reported as an unreadable file.
+                // same endpoint, so a rate limit would only fail slower
                 Err(pages_err) if pages_err.is_rate_limited() => return Err(pages_err),
-                // Nor is there any point asking the same model to describe the
-                // same file another way. Only the file's own text is left.
+                // same model another way gives the same answer; text is all that is left
                 Err(pages_err) if pages_err.is_rendition_failure() => {
                     return if has_text {
                         text_layer_fallback(state, &resolved, filename, &extracted).await
@@ -1062,10 +926,7 @@ async fn analyze_pdf(
                         Err(pages_err)
                     };
                 }
-                /* The endpoint has said this model does not take images. The
-                   native document part is the same kind of refusal one step
-                   later, and on endpoints that do not implement it at all the
-                   second error is worse than the first, so it is not tried. */
+                // native document is the same refusal later, and worse where unimplemented
                 Err(pages_err) if pages_err.is_modality_refusal() => {
                     if has_text {
                         return text_layer_fallback(state, &resolved, filename, &extracted).await;
@@ -1088,7 +949,7 @@ async fn analyze_pdf(
                 }
             }
         }
-        // The renderer could not parse the file: try the native document.
+        // renderer could not parse it, try the native document
         match analyze_native_document(state, &resolved, source, filename, &bytes).await {
             Ok(done) => return Ok(done),
             Err(doc_err) if doc_err.is_rate_limited() => return Err(doc_err),
@@ -1099,21 +960,17 @@ async fn analyze_pdf(
         }
     }
 
-    // Only a non-vision model with a usable text layer reaches here.
+    // only a non-vision model with a text layer gets here
     text_layer_fallback(state, &resolved, filename, &extracted).await
 }
 
-/// "12/177" back into numbers.
 fn parse_progress(progress: &str) -> Option<(usize, usize)> {
     let (done, total) = progress.split_once('/')?;
     Some((done.trim().parse().ok()?, total.trim().parse().ok()?))
 }
 
-/// What the user sees when every PDF path failed: the provider's own words,
-/// plus what to do about it. Never a guess presented as a rendition.
+// provider's own words plus the fix, never a guess as a rendition
 fn honest_pdf_error(cause: &AppError) -> AppError {
-    // One sentence a person can act on, with the provider's own words in it
-    // rather than the JSON they arrived in.
     AppError::Unsupported(format!(
         "the analyzer endpoint could not read this PDF: {}. The file has no usable \
          text layer and the endpoint took neither page images nor the document \
@@ -1122,10 +979,7 @@ fn honest_pdf_error(cause: &AppError) -> AppError {
     ))
 }
 
-/// The PDF's own text. Read through its fonts first (`render::extract_text`),
-/// since that is the only way to decode most real PDFs; the raw string scan
-/// below is kept for files the interpreter cannot parse. Interpreting every
-/// page is real work, so it runs off the async threads.
+// fonts first (ToUnicode map), raw string scan only if the interpreter fails
 async fn pdf_text(bytes: &[u8]) -> String {
     let bytes = bytes.to_vec();
     tokio::task::spawn_blocking(move || {
@@ -1140,16 +994,11 @@ async fn pdf_text(bytes: &[u8]) -> String {
     .unwrap_or_default()
 }
 
-/// Fallback text-layer extraction: FlateDecode and ASCII85/ASCIIHex streams are
-/// decoded, image streams (DCT, CCITT, JBIG2, JPX) are skipped, and literal
-/// `( ... )` plus hex `< ... >` strings are collected from everything
-/// textual. Raw compressed bytes are never scanned, so binary junk cannot
-/// pose as document text.
+// decompress text streams, skip image codecs, never scan raw compressed bytes
 pub fn extract_pdf_text(bytes: &[u8]) -> String {
     let spans = stream_spans(bytes);
 
-    // Everything textual: the gaps between streams (document structure and
-    // metadata) plus each successfully decoded stream.
+    // gaps between streams (structure, metadata) plus each decoded stream
     let mut textual = Vec::with_capacity(bytes.len() / 2);
     let mut cursor = 0;
     for &(start, end) in &spans {
@@ -1169,9 +1018,7 @@ pub fn extract_pdf_text(bytes: &[u8]) -> String {
     scan_pdf_strings(&textual)
 }
 
-/// Whether bytes read like document structure or content rather than binary
-/// residue. Unfiltered font, image and xref streams fail this and are skipped
-/// instead of diluting the real text with junk tokens.
+// unfiltered font, image and xref streams fail this and are skipped
 fn looks_textual(data: &[u8]) -> bool {
     let sample = &data[..data.len().min(4096)];
     if sample.is_empty() {
@@ -1181,7 +1028,6 @@ fn looks_textual(data: &[u8]) -> bool {
     ok * 10 >= sample.len() * 7
 }
 
-/// Byte spans of `stream ... endstream` data sections.
 fn stream_spans(bytes: &[u8]) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut i = 0;
@@ -1212,13 +1058,10 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-/// Filters named by the stream's dictionary. `None` means the dictionary
-/// could not be read (for example an indirect `/Filter 12 0 R`), in which
-/// case the stream is skipped rather than scanned raw.
+// an indirect /Filter ref means skip, do not scan the stream raw
 fn parse_filters(dict: &[u8]) -> Option<Vec<String>> {
     let at = match find_bytes(dict, b"/Filter") {
         Some(at) => at,
-        // No filter key at all: the stream is raw.
         None => return Some(Vec::new()),
     };
     let mut rest = &dict[at + 7..];
@@ -1246,7 +1089,6 @@ fn parse_filters(dict: &[u8]) -> Option<Vec<String>> {
         names.push(String::from_utf8_lossy(&rest[1..1 + len]).into_owned());
         Some(names)
     } else {
-        // Indirect reference or unexpected shape: do not guess.
         None
     }
 }
@@ -1255,10 +1097,7 @@ fn is_name_char(b: u8) -> bool {
     !matches!(b, b'\0'..=b' ' | b'/' | b'[' | b']' | b'<' | b'>' | b'(' | b')' | b'%')
 }
 
-/// Run a stream's filter chain. Anything image-shaped, encrypted-shaped or
-/// unknown yields `None`: the stream is skipped.
-/// The most one PDF stream may decompress to, and the most all of them
-/// together may add up to. Both exist to bound a decompression bomb.
+// per-stream and total decompression ceilings, both bound a decompression bomb
 const STREAM_MAX_BYTES: usize = 16 * 1024 * 1024;
 const EXTRACT_MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -1271,16 +1110,13 @@ fn decode_stream(filters: Option<Vec<String>>, data: &[u8]) -> Option<Vec<u8>> {
     for f in &filters {
         match f.as_str() {
             "FlateDecode" | "Fl" => {
-                // Unbounded inflate is how a kilobyte of PDF turns into a
-                // gigabyte of memory. A stream past this ceiling is not text
-                // anyone wrote, so the whole stream is dropped.
+                // past this ceiling it is not text anyone wrote, drop the stream
                 buf = miniz_oxide::inflate::decompress_to_vec_with_limit(&buf, STREAM_MAX_BYTES)
                     .ok()?;
             }
             "ASCII85Decode" | "A85" => buf = ascii85_decode(&buf)?,
             "ASCIIHexDecode" | "AHx" => buf = ascii_hex_decode(&buf)?,
-            // Decryption without a password never yields text; image codecs
-            // never do either.
+            // no password means Crypt yields nothing readable, and so do image codecs
             "Crypt" => {}
             "DCTDecode" | "DCT" | "CCITTFaxDecode" | "CCF" | "JBIG2Decode" | "JPXDecode" => {
                 return None;
@@ -1291,8 +1127,6 @@ fn decode_stream(filters: Option<Vec<String>>, data: &[u8]) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Adobe ASCII85, with `z` shorthand, whitespace skipping and optional
-/// `<~` `~>` wrappers.
 fn ascii85_decode(data: &[u8]) -> Option<Vec<u8>> {
     let mut chars: Vec<u8> = data
         .iter()
@@ -1330,7 +1164,7 @@ fn ascii85_decode(data: &[u8]) -> Option<Vec<u8>> {
         if n == 1 {
             return None;
         }
-        // A short final group pads with `u`, and loses its tail bytes.
+        // short final group is padded with u and loses its tail bytes
         let mut value = 0u32;
         for g in group.iter() {
             value = value * 85 + g;
@@ -1357,8 +1191,6 @@ fn ascii_hex_decode(data: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Collect literal `( ... )` strings (with escapes and nesting) and hex
-/// `< ... >` strings from textual bytes.
 fn scan_pdf_strings(buf: &[u8]) -> String {
     let mut out = Vec::<String>::new();
     let mut i = 0;
@@ -1454,9 +1286,6 @@ fn scan_pdf_strings(buf: &[u8]) -> String {
         .join(" ")
 }
 
-/// Whether the extraction reads like a document rather than binary residue.
-/// Junk passes a pure length check easily, so most tokens must also be
-/// word-like and of sane length.
 pub fn usable_text_layer(text: &str) -> bool {
     if text.chars().count() < PDF_TEXT_SUBSTANTIAL {
         return false;
@@ -1471,12 +1300,10 @@ pub fn usable_text_layer(text: &str) -> bool {
             wordy += 1;
         }
     }
-    // Fewer than 60 tokens, absurdly long tokens on average, or under 40%
-    // word-like: not a text layer.
+    // under 60 tokens, too-long tokens, or under 40% wordy: not a text layer
     total >= 60 && text.chars().count() / total <= 25 && wordy * 5 >= total * 2
 }
 
-/// First `max` characters, reporting whether anything was cut.
 fn truncate_chars(s: &str, max: usize) -> (String, bool) {
     if s.chars().count() <= max {
         return (s.to_string(), false);
@@ -1484,10 +1311,7 @@ fn truncate_chars(s: &str, max: usize) -> (String, bool) {
     (s.chars().take(max).collect(), true)
 }
 
-/// Ask the analyzer a targeted question about one source's ORIGINAL bytes.
-/// This is what the researcher reaches for when the rendition isn't enough
-/// ("what are the axis units in figure 3?"). Wired into the agent loop in
-/// phase 2; usable directly today.
+// reread the original bytes when the rendition is not enough
 pub async fn ask_source(state: &AppState, source: &Source, question: &str) -> AppResult<String> {
     use crate::llm::{ChatRequest, ContentPart, Message, Role, part_for_file};
 
@@ -1530,9 +1354,7 @@ pub async fn ask_source(state: &AppState, source: &Source, question: &str) -> Ap
             &resolved.model.display_name,
             " while reading this source",
         )),
-        // Some endpoints reject the document part itself (notably ones that
-        // take images but not files). For a PDF with a usable text layer,
-        // answer from that instead of failing.
+        // some endpoints take images but not files; use the text layer instead
         Err(_) if matches!(kind, Kind::Pdf) => {
             let extracted = pdf_text(&bytes).await;
             if !usable_text_layer(&extracted) {
@@ -1572,26 +1394,22 @@ fn kind_of(source: &Source) -> Kind {
 mod tests {
     use super::*;
 
-    /// Verbatim, from smolvlm2-2.2b-instruct handed a one page timetable. It
-    /// reads well and is wrong: "PHL" is philosophy, not "Person".
-    const CAPTION: &str = "The PDF contains the 2026 Fall timetable for a \
-university, listing various courses and their corresponding times on weekdays. \
-The schedule is organized by days of the week from Monday to Friday, with each \
-day having a list of courses starting at different times. The courses are listed \
-in columns under \"PHL\" (Person), indicating that they are taught by a specific \
-person or group. The timetable also includes information about the location and \
-time duration for each course.";
+    // verbatim from a small vlm on a one page schedule; fluent and wrong
+    const CAPTION: &str = "The PDF contains a schedule for an event, listing \
+various sessions and their corresponding times on weekdays. The schedule is \
+organized by days of the week from Monday to Friday, with each day having a list \
+of sessions starting at different times. The sessions are listed in columns \
+under \"Room\", indicating that they are held in a specific room. The schedule \
+also includes information about the location and time duration for each session.";
 
     #[test]
     fn a_caption_is_not_a_rendition() {
         assert!(page_rendition_is_a_summary(CAPTION, 1));
-        // Long enough to pass a length test on its own, so the opening is what
-        // has to catch it.
         assert!(CAPTION.len() > MIN_TRANSCRIPT_CHARS_PER_PAGE);
 
         for opening in [
-            "This document is a syllabus for PHL245.",
-            "The image shows a weekly timetable.",
+            "This document is a manual for the device.",
+            "The image shows a weekly schedule.",
             "Here is the PDF, summarised for you:",
             "**The file contains** three sections.",
         ] {
@@ -1601,20 +1419,15 @@ time duration for each course.";
 
     #[test]
     fn a_transcription_is_left_alone() {
-        let transcribed = "## p. 1\n\nPHL245H5F LEC0101 Mon 10:00 to 12:00 IB 345\n";
+        let transcribed = "## p. 1\n\nSection A Mon 10:00 to 12:00 Room 345\n";
         assert!(!page_rendition_is_a_summary(transcribed, 1));
-        // Page headers carry it even for a nearly empty page, which is exactly
-        // what a title page or a blank one looks like.
         assert!(!page_rendition_is_a_summary("### Page 7\n\n(blank)", 1));
         assert!(!page_rendition_is_a_summary("# p.12\n\nnothing here", 1));
 
-        // No headers, but plainly a transcription: it is long, and it does not
-        // start by naming the file.
-        let long = "PHL245H5F LEC0101 Monday 10:00 to 12:00 room IB 345. "
+        let long = "Section A meets Monday 10:00 to 12:00 in room 345. "
             .repeat(12);
         assert!(!page_rendition_is_a_summary(&long, 1));
 
-        // A sentence that merely mentions a document is not an opening about one.
         assert!(!page_rendition_is_a_summary(
             &("Theorem 4. The document of a divisor is defined as follows. ".repeat(8)),
             1
@@ -1623,7 +1436,6 @@ time duration for each course.";
 
     #[test]
     fn one_paragraph_for_a_whole_batch_is_a_summary() {
-        // Eight pages of lecture notes do not fit in three sentences.
         let thin = "Slides about groups, rings and fields, with examples. ".repeat(6);
         assert!(page_rendition_is_a_summary(&thin, 8));
         assert!(!page_rendition_is_a_summary(&thin, 1));
@@ -1631,14 +1443,13 @@ time duration for each course.";
 
     #[test]
     fn a_structured_text_layer_has_to_keep_the_text() {
-        let extracted = "Course PHL245H5F meets Mondays at ten. ".repeat(60);
-        let faithful = "Course PHL245H5F meets Mondays at ten. ".repeat(50);
-        let boiled_down = "The document lists courses and times.";
+        let extracted = "The lecture meets on Mondays at ten. ".repeat(60);
+        let faithful = "The lecture meets on Mondays at ten. ".repeat(50);
+        let boiled_down = "The document lists times.";
 
         assert!(!text_rendition_is_a_summary(&faithful, &extracted));
         assert!(text_rendition_is_a_summary(boiled_down, &extracted));
         assert!(text_rendition_is_a_summary("", &extracted));
-        // Nothing to compare against means the length test cannot fire.
         assert!(!text_rendition_is_a_summary("a short note", ""));
     }
 
@@ -1647,7 +1458,6 @@ time duration for each course.";
         assert!(check_page_budget(PDF_MAX_PAGES).is_ok());
         let err = check_page_budget(PDF_MAX_PAGES + 1).unwrap_err();
         assert!(err.to_string().contains("split it"), "{err}");
-        // The number it claims is in the message, so the refusal is checkable.
         assert!(check_page_budget(2_000_000).unwrap_err().to_string().contains("2000000"));
     }
 
@@ -1668,20 +1478,17 @@ time duration for each course.";
         }
         assert_eq!(decode_text(&utf16be), "wide text");
 
-        // Latin-1 keeps its accents rather than becoming replacement marks.
         assert_eq!(decode_text(b"caf\xe9"), "caf\u{e9}");
     }
 
     #[test]
     fn a_lying_extension_loses_to_the_bytes() {
-        // An mp3 someone renamed to .pdf, declared as a PDF for good measure.
         let mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00audio payload here";
         let (kind, media_type) =
             identify(mp3, Some("lecture.pdf"), Some("application/pdf")).expect("identified");
         assert_eq!(kind, Kind::Audio);
         assert_eq!(media_type, "audio/mpeg");
 
-        // And the other way round.
         let pdf = b"%PDF-1.7\n1 0 obj\n<< >>\nendobj\n";
         let (kind, media_type) =
             identify(pdf, Some("song.mp3"), Some("audio/mpeg")).expect("identified");
@@ -1714,13 +1521,10 @@ time duration for each course.";
             "a Windows executable"
         ));
 
-        // Binary residue with no recognisable header is refused too.
         let noise: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
         assert!(identify(&noise, Some("data.txt"), None).is_err());
     }
 
-    /// A PDF stream that inflates far past the ceiling is dropped whole rather
-    /// than allocated. Without the limit this is how a small file eats memory.
     #[test]
     fn a_decompression_bomb_is_dropped_not_inflated() {
         let payload = vec![b' '; STREAM_MAX_BYTES + 1024];
@@ -1728,23 +1532,17 @@ time duration for each course.";
         assert!(squashed.len() < 100_000, "the bomb should be small on disk");
         assert!(decode_stream(Some(vec!["FlateDecode".into()]), &squashed).is_none());
 
-        // A stream inside the ceiling still decodes, so the guard only bites
-        // on the absurd.
         let ordinary = miniz_oxide::deflate::compress_to_vec(b"BT (real text) Tj ET", 6);
         let out = decode_stream(Some(vec!["FlateDecode".into()]), &ordinary).expect("decoded");
         assert!(out.starts_with(b"BT ("));
     }
 
-    /// A PDF whose bytes are damaged past parsing yields no pages and no text,
-    /// which is what sends the analyzer to its fallbacks instead of panicking.
     #[test]
     fn a_corrupt_pdf_yields_nothing_without_panicking() {
         let mut broken = b"%PDF-1.5\n".to_vec();
         broken.extend((0u8..=255).cycle().take(3000));
         assert_eq!(render::page_count(&broken), 0);
         assert!(render::render_pdf_range(&broken, 0, 8).is_empty());
-        // It is still recognisably a PDF, so it is not turned away at upload:
-        // the analyzer gets its chance to read whatever survived.
         assert_eq!(sniff::sniff(&broken).kind, Some(Kind::Pdf));
         let _ = extract_pdf_text(&broken);
     }
@@ -1816,10 +1614,8 @@ time duration for each course.";
 
     #[test]
     fn ascii85_decodes_a_known_vector() {
-        // "87cUR" is the textbook encoding of "Hell".
         assert_eq!(ascii85_decode(b"87cUR"), Some(b"Hell".to_vec()));
         assert_eq!(ascii85_decode(b"z"), Some(vec![0, 0, 0, 0]));
-        // `~` is outside the `!`..=`u` alphabet.
         assert_eq!(ascii85_decode(b"87cUR~"), None);
     }
 
@@ -1853,9 +1649,6 @@ time duration for each course.";
 
     #[test]
     fn binary_streams_do_not_poison_a_real_text_layer() {
-        // A text content stream plus a large unfiltered binary stream, as in a
-        // PDF with embedded font binaries. The binary must not drag the layer
-        // below usable.
         let sentence = "The definition states that an integer n is even when another \
             integer m exists with n equal to twice m. ";
         let mut pdf = b"%PDF-1.4\n1 0 obj\n<< /Length 0 >>\nstream\n".to_vec();

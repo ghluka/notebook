@@ -1,13 +1,4 @@
-//! PDF page rasterization via hayro (pure Rust, CPU only).
-//!
-//! Page images are what make PDFs work on endpoints that reject native
-//! documents, and what captures figures, charts and non-selectable maths.
-//! Rendering is slow and can stumble on odd files, so every page is isolated:
-//! one bad page never kills the rest, and zero rendered pages just means the
-//! caller falls back to the document or text path.
-//!
-//! The same interpreter also reads the text layer (`extract_text`), because
-//! the characters on a page are only knowable through its fonts.
+//! pdf to png, and the text layer too, both through hayro. each page isolated so one bad page doesn't kill the render.
 
 use std::panic::AssertUnwindSafe;
 
@@ -20,18 +11,16 @@ use hayro::hayro_interpret::{
 use hayro::hayro_syntax::page::Page;
 use kurbo::{Affine, BezPath, Point, Rect};
 
-/// Roughly 144 DPI. Legible for transcription and figures without huge PNGs.
+// ~144 dpi: legible for figures, no huge pngs
 const RENDER_SCALE: f32 = 2.0;
-/// A single noisy page image never grows past this; oversize pages are skipped.
 const MAX_PNG_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct PagePng {
-    /// Zero-based page index, so headers stay truthful when pages are skipped.
+    // zero-based; pages can be skipped, headers must still line up
     pub index: usize,
     pub png: Vec<u8>,
 }
 
-/// How many pages the file has, or zero when hayro cannot parse it at all.
 pub fn page_count(bytes: &[u8]) -> usize {
     match hayro::hayro_syntax::Pdf::new(bytes.to_vec()) {
         Ok(pdf) => pdf.pages().len(),
@@ -39,12 +28,7 @@ pub fn page_count(bytes: &[u8]) -> usize {
     }
 }
 
-/// Render one slice of the document, in order.
-///
-/// Rendering a whole book at once would hold every page image in memory at the
-/// same time, so the analyzer asks for a batch, sends it, and comes back for
-/// the next. The file is reparsed per batch, which is cheap next to rendering.
-/// Pages that fail are skipped, so the result can be shorter than asked for.
+// file is reparsed per batch; failed pages are skipped, so the result can be shorter than asked
 pub fn render_pdf_range(bytes: &[u8], start: usize, count: usize) -> Vec<PagePng> {
     let Ok(pdf) = hayro::hayro_syntax::Pdf::new(bytes.to_vec()) else {
         return Vec::new();
@@ -81,8 +65,7 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     if rgba.len() != width as usize * height as usize * 4 {
         return Err("pixmap size mismatch".into());
     }
-    // The pixmap is premultiplied, but the background is opaque white, so
-    // every alpha is 255 and the bytes are plain RGBA.
+    // premultiplied, but the white background makes every alpha 255, so plain rgba
     let mut buf = Vec::new();
     let mut enc = png::Encoder::new(&mut buf, width, height);
     enc.set_color(png::ColorType::Rgba);
@@ -97,15 +80,7 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// The text of every page, each under a `## p. N` header, in the order the
-/// page draws it.
-///
-/// Each glyph's character comes from its font (the ToUnicode map, then glyph
-/// names and standard encodings), which is the only way to read most PDFs:
-/// Word, LaTeX and journal PDFs store text as glyph ids that mean nothing
-/// without that map, so the raw strings in the file are gibberish. Invisible
-/// text, which is how a scanned paper carries its OCR, comes through too. A
-/// page that fails to interpret is skipped, like a page that fails to render.
+// characters come from each glyph's font map; raw strings in word/latex pdfs are gibberish
 pub fn extract_text(bytes: &[u8]) -> String {
     let Ok(pdf) = hayro::hayro_syntax::Pdf::new(bytes.to_vec()) else {
         return String::new();
@@ -129,7 +104,6 @@ fn page_text<'a>(
     settings: &InterpreterSettings,
 ) -> String {
     let (width, height) = page.render_dimensions();
-    // The page's own transform, so y grows down the page as it is read.
     let mut ctx = Context::new(
         page.initial_transform(true).to_kurbo(),
         Rect::new(0.0, 0.0, width as f64, height as f64),
@@ -142,7 +116,6 @@ fn page_text<'a>(
     device.text.trim().to_string()
 }
 
-/// A glyph as it landed on the page: where it starts and ends, and how big it is.
 struct Placed {
     text: String,
     origin: Point,
@@ -150,7 +123,6 @@ struct Placed {
     size: f64,
 }
 
-/// A device that draws nothing and writes down every character instead.
 #[derive(Default)]
 struct TextDevice {
     text: String,
@@ -158,13 +130,10 @@ struct TextDevice {
 }
 
 impl TextDevice {
-    /// Spacing comes from geometry, since a PDF rarely draws its spaces: a
-    /// baseline half a line lower is a new line, much lower or back up at the
-    /// top of the next column is a new paragraph, and a gap wider than a thin
-    /// space between glyphs on one line is a word break.
+    // spacing is all geometry: pdfs rarely draw spaces, a lower baseline is a newline, a bigger gap a space
     fn place(&mut self, text: String, origin: Point, end: Point, size: f64) {
         if let Some(last) = &self.last {
-            // Fill-and-stroke text draws every glyph twice.
+            // fill-and-stroke draws each glyph twice
             if last.text == text && (last.origin - origin).hypot() < 0.01 {
                 return;
             }
@@ -189,9 +158,7 @@ impl TextDevice {
     }
 }
 
-/// Typeset ligatures back into their letters. A font maps its ﬁ glyph to the
-/// single character U+FB01, and to the search index a word spelled with it is
-/// a different word: "classiﬁcation" never matches "classification".
+// a ligature is its own codepoint, so the index sees "classi\ufb01cation" as a different word
 fn unfold_ligatures(text: String) -> String {
     if !text.chars().any(|c| ('\u{FB00}'..='\u{FB06}').contains(&c)) {
         return text;
@@ -238,7 +205,7 @@ impl<'a> Device<'a> for TextDevice {
             return;
         }
         let text = unfold_ligatures(text);
-        // Glyph space is 1000 units to the em, and so are advance widths.
+        // glyph space and advance widths are both 1000 units per em
         let placed = transform * glyph_transform;
         let origin = placed * Point::ORIGIN;
         let size = (placed * Point::new(0.0, 1000.0) - origin).hypot();
@@ -256,8 +223,6 @@ impl<'a> Device<'a> for TextDevice {
 mod tests {
     use super::*;
 
-    /// A one-page PDF with a red square and no fonts, with a correct xref
-    /// table so the parser has no excuse.
     fn tiny_pdf() -> Vec<u8> {
         let content = b"1 0 0 rg 0 0 100 100 re f\n";
         let objects: Vec<Vec<u8>> = vec![
@@ -276,8 +241,6 @@ mod tests {
         build_pdf(&objects)
     }
 
-    /// Two lines of Helvetica, the way most generated PDFs set text: a font
-    /// resource, a size, and strings positioned with `Td`.
     fn text_pdf() -> Vec<u8> {
         let content = b"BT /F1 24 Tf 72 700 Td (Hello world) Tj 0 -30 Td (Second line) Tj ET\n";
         build_pdf(&[
@@ -298,7 +261,6 @@ mod tests {
         ])
     }
 
-    /// A PDF around these objects, with a correct xref table.
     fn build_pdf(objects: &[Vec<u8>]) -> Vec<u8> {
         let mut pdf = b"%PDF-1.4\n".to_vec();
         let mut offsets = Vec::new();
@@ -329,7 +291,6 @@ mod tests {
         let pages = render_pdf_range(&pdf, 0, 4);
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].index, 0);
-        // PNG magic, and big enough to hold a 400x400 image.
         assert_eq!(&pages[0].png[..8], b"\x89PNG\r\n\x1a\n");
         assert!(pages[0].png.len() > 1000);
     }
@@ -345,8 +306,6 @@ mod tests {
         assert_eq!(extract_text(&text_pdf()), "## p. 1\n\nHello world\nSecond line");
     }
 
-    /// Journal PDFs set "fi" and "fl" as ligatures, which the search index
-    /// would otherwise treat as different letters.
     #[test]
     fn ligatures_come_back_as_letters() {
         assert_eq!(unfold_ligatures("classi\u{FB01}cation".into()), "classification");

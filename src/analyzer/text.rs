@@ -1,11 +1,7 @@
-//! The no-LLM ingestion path: text and markdown are already the rendition we
-//! want, so they only need chunking. Everything the multi-modal analyzer
-//! produces in Phase 1 lands in this same shape.
+//! text and markdown are already the rendition, they only need chunking
 
 use crate::db::NewChunk;
 
-/// Roughly 1200 characters (~300 tokens) per chunk, split on blank lines and
-/// never across a markdown heading.
 const TARGET_CHARS: usize = 1200;
 
 pub fn chunk_markdown(markdown: &str) -> Vec<NewChunk> {
@@ -37,7 +33,6 @@ pub fn chunk_markdown(markdown: &str) -> Vec<NewChunk> {
             in_fence = !in_fence;
         }
 
-        // A heading outside a code fence starts a new chunk.
         if !in_fence && trimmed.starts_with('#') {
             flush(&mut buf, &buf_heading, buf_start_line);
             heading = Some(trimmed.trim_start_matches('#').trim().to_string());
@@ -55,7 +50,6 @@ pub fn chunk_markdown(markdown: &str) -> Vec<NewChunk> {
         buf.push_str(line);
         buf.push('\n');
 
-        // Break on a paragraph boundary once we are past the target size.
         if !in_fence && buf.len() >= TARGET_CHARS && trimmed.is_empty() {
             flush(&mut buf, &buf_heading, buf_start_line);
         }
@@ -65,8 +59,6 @@ pub fn chunk_markdown(markdown: &str) -> Vec<NewChunk> {
     chunks
 }
 
-/// First non-heading paragraph, capped. A placeholder until the analyzer
-/// writes real summaries.
 pub fn naive_summary(markdown: &str) -> Option<String> {
     let para = markdown
         .split("\n\n")

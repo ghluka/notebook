@@ -1,5 +1,4 @@
-//! Content-addressed file store. Bytes go to `<upload_dir>/<ab>/<sha256>`;
-//! the database only ever holds the relative path.
+//! content-addressed store: bytes live at `<upload_dir>/<ab>/<sha256>`, the db only holds the relative path
 
 use std::path::{Path, PathBuf};
 
@@ -14,7 +13,6 @@ pub struct Stored {
     pub sha256: String,
     pub relative_path: String,
     pub byte_size: usize,
-    /// False when an identical file was already on disk.
     pub is_new: bool,
 }
 
@@ -33,8 +31,6 @@ impl Storage {
         tokio::fs::read(self.absolute(relative)).await
     }
 
-    /// The first `limit` bytes, for deciding what a file is without pulling a
-    /// two hundred megabyte video into memory to look at its header.
     pub async fn read_head(&self, relative: &str, limit: usize) -> std::io::Result<Vec<u8>> {
         use tokio::io::AsyncReadExt;
 
@@ -65,8 +61,7 @@ impl Storage {
         })
     }
 
-    /// Only removes the blob when no other source still points at it;
-    /// callers pass the number of remaining references.
+    /// caller counts refs; the blob goes only at zero
     pub async fn remove_if_unreferenced(
         &self,
         relative: &str,

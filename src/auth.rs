@@ -1,14 +1,4 @@
-//! Password gate for the whole site.
-//!
-//! Single user, same as the rest of the app: one row in `users` carries a
-//! password hash, and every request except the login endpoints needs a valid
-//! session cookie. The middleware runs outside the router, so an unknown path
-//! without a session still answers 401 rather than leaking whether it exists.
-//!
-//! Login is guarded twice: a proof of work challenge (the client burns ~a
-//! second of hashing per attempt, which makes bulk guessing expensive) and a
-//! per IP rate limiter. No new crates: hashing is iterated SHA256 over the
-//! `sha2` crate the app already depends on.
+//! single user password gate: proof of work plus a per ip rate limit, cookie after.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,28 +16,15 @@ use crate::db::{Db, new_id, now};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-// ------------------------------------------------------------ constants
-
-/// Cookie that carries the session token. Tied to the browser profile, so one
-/// login covers every tab in it and none outside it.
 pub const COOKIE_NAME: &str = "notebook_session";
-/// How long a session lasts without being seen. Touched on use, so daily use
-/// never logs out.
 const SESSION_DAYS: i64 = 30;
-/// Leading zero bits a proof of work solution must show. 18 bits averages
-/// ~260k hashes, about a second in the login page, milliseconds to verify.
 pub const POW_DIFFICULTY: u32 = 18;
-/// A challenge lives 5 minutes and is single use.
 const POW_TTL: Duration = Duration::from_secs(300);
-/// Password hashing cost. Only runs on login and password change.
 const HASH_ITERATIONS: u32 = 100_000;
-/// Per IP budgets. Login covers both login and setup attempts.
 const CHALLENGE_LIMIT: usize = 30;
 const CHALLENGE_WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_LIMIT: usize = 10;
 const LOGIN_WINDOW: Duration = Duration::from_secs(300);
-
-// ------------------------------------------------------------------ hex
 
 fn hex_encode(bytes: &[u8]) -> String {
     const C: &[u8; 16] = b"0123456789abcdef";
@@ -63,9 +40,7 @@ fn sha256_hex(data: &[u8]) -> String {
     hex_encode(&Sha256::digest(data))
 }
 
-// ------------------------------------------------------- password hash
-
-/// `v1$<iterations>$<salt hex>$<hash hex>`, salt is 128 random bits.
+// stored as v1$<iterations>$<salt hex>$<hash hex>, salt is 128 random bits
 pub fn hash_password(password: &str) -> String {
     let salt = uuid::Uuid::new_v4().simple().to_string();
     let hash = stretch(password, &salt, HASH_ITERATIONS);
@@ -85,7 +60,7 @@ fn stretch(password: &str, salt_hex: &str, rounds: u32) -> String {
     hex_encode(&h)
 }
 
-/// Constant time compare, so a wrong password costs the same as a right one.
+// constant time, so a wrong password costs the same as a right one
 fn slow_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
@@ -112,8 +87,6 @@ pub fn verify_password(password: &str, stored: &str) -> bool {
     }
 }
 
-// ---------------------------------------------------------- proof of work
-
 fn leading_zero_bits(digest: &[u8]) -> u32 {
     let mut n = 0;
     for b in digest {
@@ -127,16 +100,13 @@ fn leading_zero_bits(digest: &[u8]) -> u32 {
     n
 }
 
-/// The client finds `solution` such that SHA256(nonce || solution) shows
-/// `POW_DIFFICULTY` leading zero bits. Verification is one hash.
+// sha256(nonce || solution) must show difficulty leading zero bits
 pub fn pow_meets(nonce: &str, solution: &str, difficulty: u32) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(nonce.as_bytes());
     hasher.update(solution.as_bytes());
     leading_zero_bits(&hasher.finalize()) >= difficulty
 }
-
-// ---------------------------------------------------------------- state
 
 struct Challenge {
     expires_at: Instant,
@@ -149,8 +119,6 @@ struct Buckets {
 }
 
 impl Buckets {
-    /// Record one event, pruning older entries. Returns how many remain in
-    /// the window including this one.
     fn push(bucket: &mut HashMap<String, Vec<Instant>>, key: &str, window: Duration) -> usize {
         let cutoff = Instant::now().checked_sub(window).unwrap_or_else(Instant::now);
         let entry = bucket.entry(key.to_string()).or_default();
@@ -160,8 +128,6 @@ impl Buckets {
     }
 }
 
-/// In memory auth state: single use challenges plus per IP rate buckets.
-/// Short lived by design, so a restart just invalidates pending challenges.
 #[derive(Clone, Default)]
 pub struct AuthState {
     inner: Arc<Mutex<InnerAuth>>,
@@ -177,14 +143,12 @@ impl AuthState {
     pub fn issue_challenge(&self) -> (String, u32) {
         let nonce = uuid::Uuid::new_v4().simple().to_string();
         let mut inner = self.inner.lock().expect("auth lock");
-        // Expired nonces never accumulate: sweep on issue, which is cheap.
         let now = Instant::now();
         inner.challenges.retain(|_, c| c.expires_at > now);
         inner.challenges.insert(nonce.clone(), Challenge { expires_at: now + POW_TTL });
         (nonce, POW_DIFFICULTY)
     }
 
-    /// Consume a challenge if it is live and the solution checks out.
     pub fn consume_challenge(&self, nonce: &str, solution: &str) -> bool {
         let mut inner = self.inner.lock().expect("auth lock");
         let Some(c) = inner.challenges.remove(nonce) else { return false };
@@ -197,7 +161,6 @@ impl AuthState {
         pow_meets(nonce, solution, POW_DIFFICULTY)
     }
 
-    /// Returns seconds to wait when over budget, else records and returns None.
     pub fn check_challenge_rate(&self, ip: &str) -> Option<u64> {
         let mut inner = self.inner.lock().expect("auth lock");
         let n = Buckets::push(&mut inner.buckets.challenges, ip, CHALLENGE_WINDOW);
@@ -210,8 +173,6 @@ impl AuthState {
         if n > LOGIN_LIMIT { Some(300) } else { None }
     }
 }
-
-// -------------------------------------------------------------- sessions
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct Session {
@@ -231,8 +192,7 @@ fn expiry(days_from_now: i64) -> String {
     (chrono::Utc::now() + chrono::Duration::days(days_from_now)).to_rfc3339()
 }
 
-/// Create a session and return the raw token (hashed in storage, never read
-/// back). The token is 512 bits of UUID randomness rendered as hex.
+// returns the raw token; only its sha256 is stored
 pub async fn create_session(db: &Db, user_id: &str, ip: &str, ua: &str) -> sqlx::Result<String> {
     let token =
         format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
@@ -254,7 +214,6 @@ pub async fn create_session(db: &Db, user_id: &str, ip: &str, ua: &str) -> sqlx:
     Ok(token)
 }
 
-/// Look a presented token up. Expired rows read as absent and are swept.
 pub async fn lookup_session(db: &Db, token: &str) -> sqlx::Result<Option<Session>> {
     let hash = sha256_hex(token.trim().as_bytes());
     let session = sqlx::query_as::<_, Session>("SELECT * FROM sessions WHERE token_hash = ?1")
@@ -272,8 +231,7 @@ pub async fn lookup_session(db: &Db, token: &str) -> sqlx::Result<Option<Session
     Ok(Some(s))
 }
 
-/// Sliding expiry, but at most one write per hour per session so the 1.5s
-/// explorer poll does not churn the table.
+// at most one write an hour, the explorer polls every 1.5s
 pub async fn touch_session(db: &Db, session: &Session) -> sqlx::Result<()> {
     let seen_old = chrono::DateTime::parse_from_rfc3339(&session.last_seen_at)
         .map(|t| chrono::Utc::now().signed_duration_since(t) > chrono::Duration::hours(1))
@@ -303,8 +261,6 @@ pub async fn delete_user_sessions(db: &Db, user_id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Delete every session but the current one, so a password change signs other
-/// browsers out while this one stays in.
 pub async fn delete_other_sessions(db: &Db, user_id: &str, keep_id: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM sessions WHERE user_id = ?1 AND id != ?2")
         .bind(user_id)
@@ -323,8 +279,6 @@ pub async fn list_sessions(db: &Db, user_id: &str) -> sqlx::Result<Vec<Session>>
     .await
 }
 
-// ------------------------------------------------------- password store
-
 pub async fn password_hash(db: &Db, user_id: &str) -> sqlx::Result<String> {
     let row = sqlx::query("SELECT password_hash FROM users WHERE id = ?1")
         .bind(user_id)
@@ -342,8 +296,6 @@ pub async fn set_password_hash(db: &Db, user_id: &str, hash: &str) -> sqlx::Resu
     Ok(())
 }
 
-/// Seed a headless install once: when no password is set and the environment
-/// names one, that password wins, exactly like provider seeding.
 pub async fn seed_password_from_env(db: &Db, user_id: &str) {
     if let Ok(pw) = std::env::var("NOTEBOOK_PASSWORD")
         && !pw.trim().is_empty()
@@ -355,8 +307,6 @@ pub async fn seed_password_from_env(db: &Db, user_id: &str) {
         }
     }
 }
-
-// -------------------------------------------------------------- cookies
 
 pub fn extract_token(headers: &HeaderMap) -> Option<String> {
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
@@ -372,8 +322,6 @@ pub fn extract_token(headers: &HeaderMap) -> Option<String> {
     None
 }
 
-/// Cookie `Path`, scoped to the app when a proxy serves it from a
-/// subdirectory and to the whole site when it is at the root.
 fn cookie_path(base: &str) -> &str {
     if base.is_empty() { "/" } else { base }
 }
@@ -393,7 +341,6 @@ pub fn clear_cookie(base: &str) -> String {
     )
 }
 
-/// Best effort client address: a trusted proxy header first, then the peer.
 pub fn client_ip(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> String {
     if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         if let Some(first) = forwarded.split(',').next().map(str::trim)
@@ -405,10 +352,6 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Str
     peer.map(|p| p.ip().to_string()).unwrap_or_else(|| "unknown".into())
 }
 
-// ------------------------------------------------------------ middleware
-
-/// Paths anyone may call without a session: the login page and the three
-/// endpoints that prove who you are.
 fn is_public(method: &str, path: &str) -> bool {
     matches!(
         (method, path),
@@ -420,8 +363,7 @@ fn is_public(method: &str, path: &str) -> bool {
     )
 }
 
-/// Runs outside the router, so even a path that matches nothing answers 401
-/// to an anonymous caller instead of 404.
+// outside the router, so an unknown path still 401s instead of 404
 pub async fn require_auth(
     State(state): State<AppState>,
     request: Request,
@@ -445,14 +387,10 @@ pub async fn require_auth(
     }
 }
 
-/// What an anonymous caller gets. API calls, assets and unknown paths answer
-/// 401 JSON so existence never leaks; a browser navigating to an app entry
-/// point is bounced to the login page instead of shown that JSON.
+// api and unknown paths get 401 json; a browser gets bounced to the login page
 fn denied(request: &Request, configured_prefix: &str) -> Response {
     let path = request.uri().path();
-    // The prefix the browser is looking at the app through, which the redirect
-    // has to carry: behind a proxy at `/notebook`, a bare `/login` points at
-    // whatever else the host serves at its own root.
+    // behind a proxy at /notebook a bare /login points at the host root
     let base = crate::base::effective(configured_prefix, request.headers());
     let is_entry = path == "/" || path.starts_with("/c/");
     let wants_html = request
@@ -471,8 +409,6 @@ fn denied(request: &Request, configured_prefix: &str) -> Response {
         .into_response()
 }
 
-/// Read the session behind a request inside handlers that need to know which
-/// row is theirs (logout, password change, session list).
 pub async fn request_session(state: &AppState, headers: &HeaderMap) -> AppResult<Session> {
     let Some(token) = extract_token(headers) else {
         return Err(AppError::Unauthorized("not signed in".into()));
@@ -518,8 +454,6 @@ mod tests {
 
     #[test]
     fn pow_solution_is_checked_not_trusted() {
-        // Difficulty 1 needs a hash starting with a zero bit; "0" may or may
-        // not qualify, but whatever qualifies at 8 bits also qualifies at 1.
         let mut found = false;
         for s in 0..5000 {
             let sol = s.to_string();
@@ -558,7 +492,6 @@ mod tests {
     fn a_cookie_is_scoped_to_where_the_app_is_mounted() {
         assert!(set_cookie("t", "").contains("Path=/;"));
         assert!(clear_cookie("").contains("Path=/;"));
-        // Under a proxy the cookie belongs to the subdirectory, not the host.
         assert!(set_cookie("t", "/notebook").contains("Path=/notebook;"));
         assert!(clear_cookie("/notebook").contains("Path=/notebook;"));
     }

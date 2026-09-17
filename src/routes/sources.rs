@@ -16,21 +16,16 @@ use crate::state::AppState;
 #[derive(Serialize)]
 pub struct Uploaded {
     source: Source,
-    /// False when these exact bytes were already in the store.
     stored_new_blob: bool,
 }
 
-/// A file that was refused, and why. One bad file in a drop of twenty should
-/// not sink the other nineteen, so these travel back beside the successes.
+// one bad file shouldn't sink the rest of a drop
 #[derive(Serialize)]
 pub struct Rejected {
     filename: Option<String>,
     reason: String,
 }
 
-/// `POST /api/sources` takes any number of `file` parts, so one drop of a dozen
-/// files is one request. An optional `title` renames a single upload, and
-/// `folder_id` puts them all in a folder.
 pub async fn upload(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -84,10 +79,7 @@ pub async fn upload(
             continue;
         }
 
-        /* What it is comes from the bytes, not from the name. A file whose
-           extension lies is analyzed for what it actually is, and one that is
-           nothing the analyzer reads is turned away here, before it takes up
-           disk and a slot in the queue. */
+        // kind comes from the bytes, not the name; unreadable types are refused before storage
         let (kind, media_type) = match analyzer::identify(
             &file.bytes,
             file.filename.as_deref(),
@@ -95,7 +87,6 @@ pub async fn upload(
         ) {
             Ok(found) => found,
             Err(e) => {
-                // The bare sentence, since the file name is already beside it.
                 let reason = e.to_string();
                 let reason = reason.strip_prefix("unsupported: ").unwrap_or(&reason).to_string();
                 rejected.push(Rejected { filename: file.filename.clone(), reason });
@@ -130,18 +121,12 @@ pub async fn upload(
         uploaded.push(Uploaded { source, stored_new_blob });
     }
 
-    // Storing is done; analyzing starts now and outlives this request, so the
-    // response returns as fast as the disk writes.
+    // analysis is spawned so it outlives the request
     analyzer::spawn_analysis(&state, uploaded.iter().map(|u| u.source.clone()).collect());
 
-    // Even a drop where nothing survived answers the same way, one line per
-    // file: the client shows those reasons next to the names they belong to,
-    // which reads better than one status code standing for twenty files.
     Ok(Json(json!({ "uploaded": uploaded, "rejected": rejected })))
 }
 
-/// `GET /api/sources` returns everything the explorer draws for the open
-/// vault: folders and sources together, each carrying its parent.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let vault = db::active_vault(&state.db, &state.user_id).await?;
     let sources = db::list_sources(&state.db, &vault.id).await?;
@@ -153,8 +138,7 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<String>) -> AppRe
     Ok(Json(load(&state, &id).await?))
 }
 
-/// Distinguishes "field absent" from "field present and null", which is what
-/// separates "leave the folder alone" from "move to the root".
+// absent vs present-null separates "leave the folder" from "move to root"
 fn double_option<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -168,13 +152,10 @@ pub struct SourcePatch {
     pub title: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     pub folder_id: Option<Option<String>>,
-    /// Move to another vault, landing at its root.
     #[serde(default)]
     pub vault_id: Option<String>,
 }
 
-/// `PATCH /api/sources/{id}` renames a source, moves it between folders, or
-/// moves it to another vault.
 pub async fn patch(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -196,7 +177,6 @@ async fn owned_vault(state: &AppState, id: &str) -> AppResult<db::Vault> {
         .ok_or_else(|| AppError::NotFound(format!("vault {id}")))
 }
 
-/// `GET /api/sources/{id}/document` returns the analyzer's markdown rendition.
 pub async fn document(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -209,8 +189,6 @@ pub async fn document(
     Ok(Json(json!({ "source": source, "document": doc, "chunks": chunks })))
 }
 
-/// `GET /api/sources/{id}/raw` serves the original bytes inline, so the viewer
-/// can show a PDF or an image without a second copy of the file.
 pub async fn raw(State(state): State<AppState>, Path(id): Path<String>) -> AppResult<Response> {
     let source = load(&state, &id).await?;
     let bytes = state.storage.read(&source.storage_path).await?;
@@ -228,14 +206,11 @@ pub async fn raw(State(state): State<AppState>, Path(id): Path<String>) -> AppRe
 
 #[derive(Deserialize, Default)]
 pub struct ReingestBody {
-    /// Run on this model instead of the one holding the analyzer role. Set by
-    /// the client when retrying after a rate limit on a different model.
+    // set when retrying after a rate limit on another model
     #[serde(default)]
     pub model_id: Option<String>,
 }
 
-/// `POST /api/sources/{id}/reingest` queues the analyzer over stored bytes and
-/// returns at once. Watch the source's status for the outcome.
 pub async fn reingest(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -246,8 +221,7 @@ pub async fn reingest(
 
     db::set_source_result(&state.db, &source.id, "pending", None, None).await?;
     match model_id {
-        // A hand picked model is a one off, so it runs on its own rather than
-        // through the shared queue path that always resolves the role.
+        // hand picked model runs alone, not through the queue that resolves the role
         Some(model) => {
             let state = state.clone();
             let source = source.clone();
@@ -269,8 +243,7 @@ pub struct AskBody {
     pub question: String,
 }
 
-/// `POST /api/sources/{id}/ask` puts a question to the analyzer about the
-/// ORIGINAL file. This is the same call the researcher makes as a tool.
+// same call the researcher makes as a tool
 pub async fn ask(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -303,7 +276,6 @@ pub struct SearchParams {
     pub limit: Option<i64>,
 }
 
-/// `GET /api/search?q=` is the retrieval surface the researcher uses.
 pub async fn search(
     State(state): State<AppState>,
     Query(params): Query<SearchParams>,
@@ -315,8 +287,6 @@ pub async fn search(
             .await?;
     Ok(Json(json!({ "query": params.q, "hits": hits })))
 }
-
-// ---------------------------------------------------------------- folders
 
 #[derive(Deserialize)]
 pub struct NewFolder {
@@ -346,7 +316,6 @@ pub struct FolderPatch {
     pub name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     pub parent_id: Option<Option<String>>,
-    /// Move the folder and everything under it to another vault.
     #[serde(default)]
     pub vault_id: Option<String>,
 }
@@ -356,8 +325,7 @@ pub async fn patch_folder(
     Path(id): Path<String>,
     Json(body): Json<FolderPatch>,
 ) -> AppResult<Json<Value>> {
-    // A folder cannot be its own parent, which is the only cycle one move can
-    // create from the explorer.
+    // a folder can't be its own parent; only cycle one move can make
     if let Some(Some(parent)) = &body.parent_id {
         if *parent == id {
             return Err(AppError::BadRequest("a folder cannot contain itself".into()));
@@ -372,7 +340,6 @@ pub async fn patch_folder(
     Ok(Json(json!({ "updated": id })))
 }
 
-/// Deleting a folder keeps the files; they fall back to the root.
 pub async fn delete_folder(
     State(state): State<AppState>,
     Path(id): Path<String>,

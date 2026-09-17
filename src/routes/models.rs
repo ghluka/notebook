@@ -1,8 +1,4 @@
-//! Everything the prompt bar and the Configure panel talk to.
-//!
-//! API keys go in and are never handed back: a provider is returned with a
-//! `key_hint` ("••••abcd") and nothing else. Every query is scoped to the
-//! current user (`state.user_id`), which is the local one until auth exists.
+//! prompt bar and configure panel; provider keys go in and come back only as key_hint
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -26,7 +22,6 @@ fn view(p: Provider, model_count: usize) -> ProviderView {
     ProviderView { key_hint: p.key_hint(), has_key: !p.api_key.is_empty(), provider: p, model_count }
 }
 
-/// `GET /api/me` says who the server thinks you are. One local user for now.
 pub async fn me(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let user = models::get_user(&state.db, &state.user_id)
         .await?
@@ -34,7 +29,6 @@ pub async fn me(State(state): State<AppState>) -> AppResult<Json<Value>> {
     Ok(Json(json!({ "user": user, "auth": "local" })))
 }
 
-/// `GET /api/providers/presets` fills the "Add provider" menu.
 pub async fn presets() -> Json<Value> {
     Json(json!({ "presets": PRESETS }))
 }
@@ -61,9 +55,7 @@ pub struct NewProvider {
     pub api_key: String,
 }
 
-/// Creating a provider immediately imports its catalogue, so the model list the
-/// user sees is the one that endpoint actually serves. A provider whose list
-/// call fails is still created, and the import error is reported alongside it.
+// imports the catalogue on create; a failed import is reported, not fatal
 pub async fn create_provider(
     State(state): State<AppState>,
     Json(body): Json<NewProvider>,
@@ -104,7 +96,7 @@ pub struct ProviderPatch {
     pub name: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Absent keeps the stored key; empty string clears it.
+    // absent keeps the stored key, empty string clears it
     #[serde(default)]
     pub api_key: Option<String>,
 }
@@ -135,8 +127,6 @@ pub async fn delete_provider(
     Ok(Json(json!({ "deleted": id })))
 }
 
-/// `POST /api/providers/{id}/refresh` re-reads the endpoint's catalogue.
-/// Hidden and pinned choices survive; new ids appear, missing ones stay put.
 pub async fn refresh_provider(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -152,8 +142,6 @@ pub async fn refresh_provider(
     })))
 }
 
-// ----------------------------------------------------------------- models
-
 #[derive(Serialize)]
 pub struct ModelView {
     #[serde(flatten)]
@@ -164,7 +152,6 @@ pub struct ModelView {
 
 #[derive(Deserialize)]
 pub struct ModelQuery {
-    /// Hidden models are excluded unless asked for.
     #[serde(default)]
     pub include_hidden: bool,
     #[serde(default)]
@@ -202,8 +189,6 @@ pub async fn list_models(
     })))
 }
 
-/// Add a model the endpoint does not advertise (a fine-tune, a private
-/// deployment). The normal path is importing the provider's own list.
 pub async fn add_model(
     State(state): State<AppState>,
     Json(body): Json<NewModel>,
@@ -226,8 +211,7 @@ pub async fn update_model(
     Ok(Json(m))
 }
 
-/// The unique index on (provider_id, model_id) is the only way these calls can
-/// fail on user input, and "database: UNIQUE constraint failed" helps nobody.
+// map the unique index violation to something readable
 fn duplicate_model_id(e: sqlx::Error) -> AppError {
     if e.to_string().contains("models_provider_model_idx")
         || e.to_string().contains("models.model_id")
@@ -246,8 +230,6 @@ pub async fn delete_model(
     models::delete_model(&state.db, &state.user_id, &id).await?;
     Ok(Json(json!({ "deleted": id })))
 }
-
-// --------------------------------------------------------------- settings
 
 #[derive(Deserialize)]
 pub struct SettingsPatch {
@@ -285,14 +267,11 @@ pub async fn patch_settings(
     Ok(Json(settings_json(&state).await?))
 }
 
-/// What the prompt bar needs in one request: the models to offer, the current
-/// role assignments and effort, and each model's context window.
 async fn settings_json(state: &AppState) -> AppResult<Value> {
     let providers = models::list_providers(&state.db, &state.user_id).await?;
     let all = models::list_models(&state.db, &state.user_id).await?;
 
-    // Pinned models are the picker. Before anything is pinned, offer everything
-    // visible rather than an empty menu.
+    // before anything is pinned, offer everything visible rather than an empty menu
     let any_pinned = all.iter().any(|m| m.pinned && !m.hidden);
     let offered: Vec<Value> = all
         .iter()

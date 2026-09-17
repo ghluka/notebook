@@ -1,25 +1,11 @@
-//! What a file actually is, read from its own bytes.
-//!
-//! A name is a claim, not evidence: an mp3 renamed to `.pdf` still has an ID3
-//! header, and sending it down the PDF path wastes a model call to be told the
-//! document is unreadable. Every upload is identified here first, and the
-//! answer, not the extension, decides how it is analyzed.
-//!
-//! The formats below are the ones the analyzer can actually do something with,
-//! plus the common containers people upload by accident (archives, installers,
-//! Office documents), which are named in the refusal so the message is useful
-//! rather than just "unsupported".
+//! a name is a claim, not evidence; kind comes from the leading bytes.
 
 use super::Kind;
 
-/// What a file turned out to be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sniffed {
-    /// How to analyze it, when it is something the analyzer handles.
     pub kind: Option<Kind>,
-    /// The media type the bytes say they are, for the provider call.
     pub media_type: &'static str,
-    /// What to call it in a message to a person.
     pub label: &'static str,
 }
 
@@ -28,8 +14,6 @@ impl Sniffed {
         Sniffed { kind: Some(kind), media_type, label }
     }
 
-    /// A format we can recognise but not analyze. Named, so the refusal can say
-    /// what the file actually is.
     const fn foreign(media_type: &'static str, label: &'static str) -> Self {
         Sniffed { kind: None, media_type, label }
     }
@@ -37,11 +21,9 @@ impl Sniffed {
 
 const UNKNOWN: Sniffed = Sniffed::foreign("application/octet-stream", "an unrecognised binary file");
 
-/// How far into a file the header may start. Some PDFs carry junk before
-/// `%PDF`, and every reader in the world tolerates it.
+// some pdfs carry junk before %PDF, every reader tolerates it
 const HEADER_SLACK: usize = 1024;
 
-/// Identify a file from its leading bytes.
 pub fn sniff(bytes: &[u8]) -> Sniffed {
     if bytes.is_empty() {
         return Sniffed::foreign("application/octet-stream", "an empty file");
@@ -50,13 +32,10 @@ pub fn sniff(bytes: &[u8]) -> Sniffed {
     if let Some(found) = magic(bytes) {
         return found;
     }
-    // `%PDF` is allowed to be late, which is also how a PDF with a corrupt
-    // preamble still opens everywhere else.
     if find(&bytes[..bytes.len().min(HEADER_SLACK)], b"%PDF-").is_some() {
         return Sniffed::known(Kind::Pdf, "application/pdf", "a PDF");
     }
     if let Some(encoding) = text_bom(bytes) {
-        // A byte order mark is a file saying outright that it is text.
         return Sniffed::known(Kind::Text, encoding, "a text file");
     }
     if looks_like_svg(bytes) {
@@ -71,12 +50,10 @@ pub fn sniff(bytes: &[u8]) -> Sniffed {
 fn magic(b: &[u8]) -> Option<Sniffed> {
     let starts = |sig: &[u8]| b.starts_with(sig);
 
-    // Documents.
     if starts(b"%PDF-") {
         return Some(Sniffed::known(Kind::Pdf, "application/pdf", "a PDF"));
     }
 
-    // Images.
     if starts(b"\x89PNG\r\n\x1a\n") {
         return Some(Sniffed::known(Kind::Image, "image/png", "a PNG image"));
     }
@@ -96,7 +73,7 @@ fn magic(b: &[u8]) -> Option<Sniffed> {
         return Some(Sniffed::known(Kind::Image, "image/x-icon", "an icon file"));
     }
 
-    // RIFF containers: the form type at byte 8 says which.
+    // form type at byte 8 says which
     if starts(b"RIFF") && b.len() >= 12 {
         return Some(match &b[8..12] {
             b"WEBP" => Sniffed::known(Kind::Image, "image/webp", "a WebP image"),
@@ -106,7 +83,7 @@ fn magic(b: &[u8]) -> Option<Sniffed> {
         });
     }
 
-    // ISO base media files: `ftyp` at byte 4, brand right after.
+    // ftyp at byte 4, brand right after
     if b.len() >= 12 && &b[4..8] == b"ftyp" {
         let brand = &b[8..12];
         return Some(match brand {
@@ -120,7 +97,6 @@ fn magic(b: &[u8]) -> Option<Sniffed> {
         });
     }
 
-    // Audio.
     if starts(b"ID3") || (b.len() >= 2 && b[0] == 0xff && (b[1] & 0xe6) == 0xe2) {
         return Some(Sniffed::known(Kind::Audio, "audio/mpeg", "an MP3 audio file"));
     }
@@ -128,8 +104,7 @@ fn magic(b: &[u8]) -> Option<Sniffed> {
         return Some(Sniffed::known(Kind::Audio, "audio/flac", "a FLAC audio file"));
     }
     if starts(b"OggS") {
-        // Opus, Vorbis and Theora all ride in Ogg; the codec name is in the
-        // first page, well inside the first few hundred bytes.
+        // opus, vorbis and theora all ride in ogg; codec name is in the first page
         let head = &b[..b.len().min(512)];
         if find(head, b"OpusHead").is_some() {
             return Some(Sniffed::known(Kind::Audio, "audio/ogg", "an Opus audio file"));
@@ -146,7 +121,7 @@ fn magic(b: &[u8]) -> Option<Sniffed> {
         return Some(Sniffed::known(Kind::Audio, "audio/aac", "an AAC audio file"));
     }
     if starts(b"\x1a\x45\xdf\xa3") {
-        // Matroska and WebM share a header; the doctype follows shortly after.
+        // matroska and webm share a header, doctype follows
         let head = &b[..b.len().min(256)];
         if find(head, b"webm").is_some() {
             return Some(Sniffed::known(Kind::Video, "video/webm", "a WebM video"));
@@ -154,7 +129,6 @@ fn magic(b: &[u8]) -> Option<Sniffed> {
         return Some(Sniffed::known(Kind::Video, "video/x-matroska", "a Matroska video"));
     }
 
-    // Things we can name but cannot read.
     if starts(b"PK\x03\x04") || starts(b"PK\x05\x06") {
         let head = &b[..b.len().min(4096)];
         if find(head, b"word/").is_some() {
@@ -197,7 +171,6 @@ fn magic(b: &[u8]) -> Option<Sniffed> {
     None
 }
 
-/// The encoding a byte order mark declares, if there is one.
 pub fn text_bom(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\xef\xbb\xbf") {
         return Some("text/plain");
@@ -211,21 +184,14 @@ pub fn text_bom(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
-/// Whether these bytes read as text a person wrote rather than as a binary
-/// file that happens to be named `.txt`.
-///
-/// UTF-8 is the first test and the usual answer. Failing that, the file may
-/// still be text in an older encoding, and a note written in Latin-1 twenty
-/// years ago is not binary residue: what marks residue is NUL bytes and a
-/// scattering of control codes, so that is what is measured.
+// binary residue is NULs and stray control codes, not a file that fails utf-8
 pub fn looks_like_text(bytes: &[u8]) -> bool {
     let sample = &bytes[..bytes.len().min(8192)];
     if sample.is_empty() || sample.contains(&0) {
         return false;
     }
 
-    // A truncated sample can cut a multi-byte character in half, so a decode
-    // error in the last few bytes is not evidence of anything.
+    // a cut multi-byte char at the tail is not evidence
     let decoded = match std::str::from_utf8(sample) {
         Ok(text) => Some(text),
         Err(e) if e.valid_up_to() + 4 >= sample.len() => {
@@ -245,8 +211,7 @@ pub fn looks_like_text(bytes: &[u8]) -> bool {
         return odd * 100 < text.chars().count();
     }
 
-    // Not UTF-8. Read it as a single byte encoding: printable ASCII, the usual
-    // whitespace, and the high half where the accented letters live.
+    // fall back to a single byte encoding: ascii, whitespace and the high half
     let plausible = sample
         .iter()
         .filter(|b| matches!(b, 0x20..=0x7e | b'\n' | b'\r' | b'\t' | 0x0c | 0xa0..=0xff))
@@ -262,9 +227,7 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
     find(head, b"<svg").is_some() || find(head, b"<SVG").is_some()
 }
 
-/// The pixel dimensions a raster image declares in its header, when the format
-/// is one that says so early. This is what the header claims, which is exactly
-/// what matters: a decompression bomb is a small file that claims to be huge.
+// the header-claimed size is what matters, a bomb is a small file claiming huge
 pub fn image_dimensions(bytes: &[u8]) -> Option<(u64, u64)> {
     let be32 = |at: usize| -> Option<u64> {
         let s = bytes.get(at..at + 4)?;
@@ -286,15 +249,14 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u64, u64)> {
         return Some((le16(6)?, le16(8)?));
     }
     if bytes.starts_with(b"BM") {
-        // The DIB header holds a signed width and height; height is negative
-        // for top-down bitmaps.
+        // height is signed, negative for top-down bitmaps
         let w = le32(18)? as u32 as i32;
         let h = le32(22)? as u32 as i32;
         return Some((w.unsigned_abs() as u64, h.unsigned_abs() as u64));
     }
     if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
         return match bytes.get(12..16)? {
-            // Lossless: 14 bits each, minus one.
+            // lossless: 14 bits each, minus one
             b"VP8L" => {
                 let s = bytes.get(21..25)?;
                 let bits = u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
@@ -321,7 +283,6 @@ pub fn image_dimensions(bytes: &[u8]) -> Option<(u64, u64)> {
     None
 }
 
-/// Walk the JPEG marker segments to the frame header, which carries the size.
 fn jpeg_dimensions(bytes: &[u8]) -> Option<(u64, u64)> {
     let mut i = 2;
     while i + 3 < bytes.len() {
@@ -330,14 +291,13 @@ fn jpeg_dimensions(bytes: &[u8]) -> Option<(u64, u64)> {
             continue;
         }
         let marker = bytes[i + 1];
-        // Padding and the standalone markers carry no length field.
+        // padding and standalone markers carry no length field
         if marker == 0xff || (0xd0..=0xd9).contains(&marker) || marker == 0x01 {
             i += 2;
             continue;
         }
         let len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
-        // Every frame header (baseline, progressive, lossless) but the
-        // arithmetic-coding and hierarchical oddities in between.
+        // all frame headers except the arithmetic and hierarchical oddities
         let is_frame = (0xc0..=0xcf).contains(&marker)
             && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
         if is_frame {
@@ -384,7 +344,6 @@ mod tests {
         bytes.extend_from_slice(b"%PDF-1.4\n");
         assert_eq!(sniff(&bytes).kind, Some(Kind::Pdf));
 
-        // Far enough in and it is not a header, it is a mention.
         let mut buried = vec![b'\n'; 4000];
         buried.extend_from_slice(b"%PDF-1.4\n");
         assert_ne!(sniff(&buried).kind, Some(Kind::Pdf));
@@ -436,11 +395,9 @@ mod tests {
 
     #[test]
     fn older_encodings_are_still_text() {
-        // Latin-1: valid text to a person, invalid UTF-8 to a decoder.
         let latin1 = b"R\xe9sum\xe9 of the caf\xe9 experiment, \xb1 0.5\n";
         assert_eq!(sniff(latin1).kind, Some(Kind::Text));
 
-        // UTF-16 has NULs all through it, so only the mark saves it.
         let mut utf16 = b"\xff\xfe".to_vec();
         for c in "notes".encode_utf16() {
             utf16.extend_from_slice(&c.to_le_bytes());
@@ -468,7 +425,6 @@ mod tests {
         let gif = b"GIF89a\x40\x01\x20\x01".to_vec();
         assert_eq!(image_dimensions(&gif), Some((320, 288)));
 
-        // JPEG: APP0 then a baseline frame header of 1600 x 900.
         let mut jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
             .to_vec();
         jpeg.extend_from_slice(b"\xff\xc0\x00\x11\x08");

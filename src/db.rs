@@ -1,5 +1,3 @@
-//! SQLite access. Runtime queries only, so the build never needs a live DB.
-
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -28,8 +26,6 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-// ---------------------------------------------------------------- sources
-
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Source {
     pub id: String,
@@ -45,11 +41,8 @@ pub struct Source {
     pub storage_path: String,
     pub status: String,
     pub error: Option<String>,
-    /// The failure as JSON, when there was one. Same shape the API returns.
     pub error_detail: Option<String>,
-    /// How far the analyzer has got, as "done/total", while it is working.
     pub progress: Option<String>,
-    /// Finished sections of a long rendition, kept so a restart resumes.
     #[serde(skip_serializing)]
     pub partial: Option<String>,
     pub metadata: String,
@@ -114,8 +107,7 @@ pub async fn list_sources(db: &Db, vault: &str) -> sqlx::Result<Vec<Source>> {
     .await
 }
 
-/// Rename a source or move it between folders. `None` leaves a field alone;
-/// moving to the root is `folder_id: Some(None)`.
+// None leaves a field alone; Some(None) moves to root
 pub async fn update_source(
     db: &Db,
     id: &str,
@@ -140,8 +132,6 @@ pub async fn update_source(
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------- folders
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Folder {
@@ -215,7 +205,7 @@ pub async fn update_folder(
     Ok(())
 }
 
-/// Deleting a folder keeps the files: they fall back to the root.
+// files fall back to root, they are not deleted
 pub async fn delete_folder(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM folders WHERE id = ?1 AND owner_id = ?2")
         .bind(id)
@@ -225,10 +215,6 @@ pub async fn delete_folder(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-// ----------------------------------------------------------------- vaults
-
-/// A separate library: its own sources, folders and conversations. One is
-/// open at a time, and that is the one every list and every search sees.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Vault {
     pub id: String,
@@ -237,7 +223,6 @@ pub struct Vault {
     pub created_at: String,
 }
 
-/// A vault as the switcher lists it, with what it holds.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct VaultSummary {
     pub id: String,
@@ -247,7 +232,6 @@ pub struct VaultSummary {
     pub conversation_count: i64,
 }
 
-/// The setting that says which vault is open.
 const ACTIVE_VAULT: &str = "vault";
 
 pub async fn list_vaults(db: &Db, owner: &str) -> sqlx::Result<Vec<VaultSummary>> {
@@ -297,8 +281,7 @@ pub async fn rename_vault(db: &Db, owner: &str, id: &str, name: &str) -> sqlx::R
     Ok(())
 }
 
-/// Everything in the vault goes with it: sources and their renditions,
-/// folders, conversations. The caller deals with the files on disk.
+// the caller deletes the files on disk
 pub async fn delete_vault(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM vaults WHERE id = ?1 AND owner_id = ?2")
         .bind(id)
@@ -308,9 +291,7 @@ pub async fn delete_vault(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// The vault that is open. A setting that points at a deleted vault falls back
-/// to the oldest one, and a user with none gets one, so there is always
-/// somewhere for a file to land.
+// setting pointing at a deleted vault falls back to the oldest
 pub async fn active_vault(db: &Db, owner: &str) -> sqlx::Result<Vault> {
     if let Some(id) = crate::models::get_setting(db, owner, ACTIVE_VAULT).await?
         && let Some(vault) = get_vault(db, owner, &id).await?
@@ -335,8 +316,7 @@ pub async fn open_vault(db: &Db, owner: &str, id: &str) -> sqlx::Result<()> {
     crate::models::set_setting(db, owner, ACTIVE_VAULT, id).await
 }
 
-/// Rows with no vault, which the migration leaves behind only when their owner
-/// had no user row, go into this one rather than vanishing from every list.
+// vaultless rows would otherwise vanish from every list
 pub async fn adopt_orphans(db: &Db, owner: &str, vault: &str) -> sqlx::Result<()> {
     for sql in [
         "UPDATE sources SET vault_id = ?2 WHERE vault_id IS NULL AND owner_id = ?1",
@@ -348,8 +328,7 @@ pub async fn adopt_orphans(db: &Db, owner: &str, vault: &str) -> sqlx::Result<()
     Ok(())
 }
 
-/// Move a source into another vault. Its folder stays behind, so it lands at
-/// the root.
+// folder stays behind, so the source lands at the root
 pub async fn move_source_to_vault(db: &Db, id: &str, vault: &str) -> sqlx::Result<()> {
     sqlx::query(
         "UPDATE sources SET vault_id = ?2, folder_id = NULL, updated_at = ?3 WHERE id = ?1",
@@ -362,10 +341,7 @@ pub async fn move_source_to_vault(db: &Db, id: &str, vault: &str) -> sqlx::Resul
     Ok(())
 }
 
-/// Move a folder into another vault with everything under it: subfolders keep
-/// their shape and files stay where they were inside them. The folder itself
-/// lands at the root. `UNION` rather than `UNION ALL`, so a cycle in the
-/// parent links ends the walk instead of running it forever.
+// subfolders keep their shape; UNION (not UNION ALL) ends the walk on a cycle
 pub async fn move_folder_to_vault(db: &Db, owner: &str, id: &str, vault: &str) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query(
@@ -407,8 +383,7 @@ pub async fn set_source_status(
     set_source_result(db, id, status, error, None).await
 }
 
-/// Status plus the structured failure, which the client reads to tell a rate
-/// limit apart from a file it will never be able to read.
+// the CASE clears progress when the status is terminal
 pub async fn set_source_result(
     db: &Db,
     id: &str,
@@ -431,8 +406,6 @@ pub async fn set_source_result(
     Ok(())
 }
 
-/// How far through a long file the analyzer is. Cleared when it finishes, so
-/// a stale count never sits under a ready source.
 pub async fn set_source_progress(
     db: &Db,
     id: &str,
@@ -447,7 +420,6 @@ pub async fn set_source_progress(
     Ok(())
 }
 
-/// Save the work done so far on a long file, with the page it reached.
 pub async fn save_partial(
     db: &Db,
     id: &str,
@@ -472,8 +444,6 @@ pub async fn clear_partial(db: &Db, id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// Sources waiting for the analyzer, oldest first. Used to pick work back up
-/// after a restart, so nothing is stranded mid-queue.
 pub async fn pending_sources(db: &Db) -> sqlx::Result<Vec<Source>> {
     sqlx::query_as::<_, Source>(
         "SELECT * FROM sources WHERE status IN ('pending', 'analyzing')
@@ -488,8 +458,6 @@ pub async fn delete_source(db: &Db, id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// How many sources still point at this blob, which decides whether the file
-/// on disk can go.
 pub async fn count_sources_with_sha(db: &Db, sha256: &str) -> sqlx::Result<i64> {
     let row = sqlx::query("SELECT count(*) AS n FROM sources WHERE sha256 = ?1")
         .bind(sha256)
@@ -497,8 +465,6 @@ pub async fn count_sources_with_sha(db: &Db, sha256: &str) -> sqlx::Result<i64> 
         .await?;
     Ok(row.get::<i64, _>("n"))
 }
-
-// -------------------------------------------------------------- documents
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Document {
@@ -517,8 +483,6 @@ pub async fn get_document(db: &Db, source_id: &str) -> sqlx::Result<Option<Docum
         .await
 }
 
-/// Take the rendition away, chunks and index entries with it, leaving the
-/// source itself in place.
 pub async fn delete_document(db: &Db, source_id: &str) -> sqlx::Result<()> {
     sqlx::query("DELETE FROM documents WHERE source_id = ?1")
         .bind(source_id)
@@ -527,7 +491,7 @@ pub async fn delete_document(db: &Db, source_id: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-/// One rendition per source: replacing it drops the old chunks with it.
+// deleting the old document row cascades its chunks
 pub async fn replace_document(
     db: &Db,
     source_id: &str,
@@ -578,8 +542,6 @@ pub async fn replace_document(
     Ok(doc_id)
 }
 
-// ----------------------------------------------------------------- chunks
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewChunk {
     pub heading: Option<String>,
@@ -595,10 +557,8 @@ pub struct SearchHit {
     pub heading: Option<String>,
     pub locator: Option<String>,
     pub ordinal: i64,
-    /// The matched text with markers, for the search UI.
     pub snippet: String,
-    /// The whole chunk. What a model is given: a worked example does not fit
-    /// in a 32 token snippet, and an answer cannot be built from ellipses.
+    // whole chunk, not the snippet: a worked example does not fit 32 tokens
     pub content: String,
     pub score: f64,
 }
@@ -622,12 +582,7 @@ const SEARCH_SQL: &str = "
     ORDER BY score
     LIMIT ?3";
 
-/// Free-text search over chunk renditions. All-terms matches come first, then
-/// any-term matches fill up to the limit. Requiring every term in one chunk
-/// fails exactly when the terms live in different files: "second" in some
-/// proof and "reading" in the readings index, so the index never surfaces and
-/// the model declares the file absent after one search. Only the given vault
-/// is searched.
+// AND hits first, then OR: terms split across files would otherwise be missed
 pub async fn search_chunks(
     db: &Db,
     vault: &str,
@@ -641,7 +596,7 @@ pub async fn search_chunks(
     }
 
     let mut hits: Vec<SearchHit> = Vec::new();
-    // One term is one query; running it twice only wastes time.
+    // one term means one query, running it twice only wastes time
     let joiners: &[&str] = if terms.len() == 1 { &[" OR "] } else { &[" AND ", " OR "] };
     for joiner in joiners {
         let expr = terms.join(joiner);
@@ -680,10 +635,7 @@ pub async fn chunks_for_source(db: &Db, source_id: &str) -> sqlx::Result<Vec<Sea
     .await
 }
 
-/// Words that say how to answer rather than what to look for. A question like
-/// "whats an lde, give an example and explain it in depth" otherwise buries the
-/// one rare word that matters under chunks matching "give", "explain" and
-/// "depth", which is exactly the ranking bm25 cannot save you from.
+// how-to-answer words would bury the one rare term, bm25 cannot save that
 const STOPWORDS: &[&str] = &[
     "a", "about", "all", "am", "an", "and", "any", "are", "as", "at", "be", "been", "being",
     "but", "by", "can", "could", "describe", "did", "do", "does", "explain", "for", "from",
@@ -696,11 +648,7 @@ const STOPWORDS: &[&str] = &[
     "you", "your", "depth", "detail", "please", "thanks",
 ];
 
-/// The chunks either side of a hit.
-///
-/// A match often lands on the sentence that names a thing while the worked
-/// example runs on into the next chunk, so a hit is read with its neighbours
-/// rather than alone.
+// a worked example runs into the next chunk, so read a hit with its neighbours
 pub async fn chunks_around(
     db: &Db,
     source_id: &str,
@@ -722,10 +670,7 @@ pub async fn chunks_around(
     .await
 }
 
-/// A slice of a rendition, by line, with line numbers kept.
-///
-/// Locators are lines of this same text, so "read around line 249" is how a
-/// model follows a citation to the passage it came from.
+// locators are lines of this same text
 pub struct DocumentSlice {
     pub title: String,
     pub from_line: usize,
@@ -771,7 +716,6 @@ pub async fn read_document_lines(
     }))
 }
 
-/// Titles and summaries, for a model deciding where to look.
 pub struct SourceBrief {
     pub id: String,
     pub title: String,
@@ -798,10 +742,7 @@ pub async fn source_briefs(db: &Db, vault: &str) -> sqlx::Result<Vec<SourceBrief
     Ok(briefs)
 }
 
-/// Turn arbitrary user text into FTS5 terms. Everything is quoted, so operator
-/// characters in a question can never produce a malformed MATCH expression.
-///
-/// Function words are dropped, unless that would leave nothing to search for.
+// everything is quoted so a question's operators cannot break MATCH
 fn fts_terms(query: &str) -> Vec<String> {
     let words: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
@@ -817,9 +758,6 @@ fn fts_terms(query: &str) -> Vec<String> {
     chosen.into_iter().take(24).map(|t| format!("\"{t}\"")).collect()
 }
 
-/// The words of a query worth searching for: what `fts_terms` keeps, without
-/// its fallback to every word. How many there are tells a question that names
-/// something from one that only points back at the conversation.
 pub fn search_words(query: &str) -> Vec<String> {
     query
         .split(|c: char| !c.is_alphanumeric())
@@ -835,8 +773,8 @@ mod query_tests {
 
     #[test]
     fn drops_the_words_that_bury_the_rare_one() {
-        let terms = fts_terms("whats an lde, give an example and explain it in depth");
-        assert_eq!(terms, vec!["\"lde\"", "\"example\""]);
+        let terms = fts_terms("what is a widget, give an example and explain it in depth");
+        assert_eq!(terms, vec!["\"widget\"", "\"example\""]);
     }
 
     #[test]
@@ -920,59 +858,53 @@ mod search_tests {
         source.id
     }
 
-    /// The "second reading" failure: one term lives in a proof, the other in
-    /// the readings index. All-terms alone returns only the proof; the merged
-    /// search must also surface the index behind it.
     #[tokio::test]
     async fn any_term_hits_fill_in_behind_all_term_hits() {
         let db = scratch().await;
-        add_source(&db, "readings.md", &["Here is the weekly reading list.", "Week 02 is Sets and Propositions."])
+        add_source(&db, "catalog.md", &["Here is the weekly catalog.", "Week 02 is Maple and Oak."])
             .await;
         add_source(&db, "notes.pdf", &["Check the second item on the list."]).await;
-        add_source(&db, "both.pdf", &["The second reading group meets Friday."]).await;
+        add_source(&db, "both.pdf", &["The second catalog group meets Friday."]).await;
 
-        let hits = search_chunks(&db, "v", "second reading", None, 10).await.expect("search");
+        let hits = search_chunks(&db, "v", "second catalog", None, 10).await.expect("search");
         let titles: Vec<&str> = hits.iter().map(|h| h.source_title.as_str()).collect();
 
         assert_eq!(titles[0], "both.pdf", "the chunk with every term still ranks first");
-        assert!(titles.contains(&"readings.md"), "the index is present: {titles:?}");
+        assert!(titles.contains(&"catalog.md"), "the index is present: {titles:?}");
         assert!(titles.contains(&"notes.pdf"), "the single-term file is present: {titles:?}");
     }
 
     #[tokio::test]
     async fn single_term_queries_run_once() {
         let db = scratch().await;
-        add_source(&db, "a.md", &["Something about induction."]).await;
+        add_source(&db, "a.md", &["Something about volcanoes."]).await;
 
-        let hits = search_chunks(&db, "v", "induction", None, 10).await.expect("search");
+        let hits = search_chunks(&db, "v", "volcanoes", None, 10).await.expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].source_title, "a.md");
     }
 
-    /// A course's notes never answer a question asked in another course.
     #[tokio::test]
     async fn a_search_stays_in_its_vault() {
         let db = scratch().await;
         let other = create_vault(&db, "u", "other").await.expect("vault");
-        add_source(&db, "here.md", &["Induction on the naturals."]).await;
-        add_source_in(&db, &other.id, None, "there.md", &["Induction on trees."]).await;
+        add_source(&db, "here.md", &["Volcanoes on the plains."]).await;
+        add_source_in(&db, &other.id, None, "there.md", &["Volcanoes on the hills."]).await;
 
-        let hits = search_chunks(&db, "v", "induction", None, 10).await.expect("search");
+        let hits = search_chunks(&db, "v", "volcanoes", None, 10).await.expect("search");
         let titles: Vec<&str> = hits.iter().map(|h| h.source_title.as_str()).collect();
         assert_eq!(titles, vec!["here.md"]);
         assert_eq!(source_briefs(&db, &other.id).await.expect("briefs").len(), 1);
     }
 
-    /// Moving a folder takes its subfolders and their files, and leaves the
-    /// rest of the vault alone.
     #[tokio::test]
     async fn moving_a_folder_takes_everything_under_it() {
         let db = scratch().await;
         let other = create_vault(&db, "u", "other").await.expect("vault");
-        let top = create_folder(&db, "u", "v", "MAT102", None).await.expect("folder");
-        let inner = create_folder(&db, "u", "v", "week 1", Some(&top.id)).await.expect("folder");
-        add_source_in(&db, "v", Some(&top.id), "syllabus.md", &["x"]).await;
-        add_source_in(&db, "v", Some(&inner.id), "sets.md", &["y"]).await;
+        let top = create_folder(&db, "u", "v", "course", None).await.expect("folder");
+        let inner = create_folder(&db, "u", "v", "unit 1", Some(&top.id)).await.expect("folder");
+        add_source_in(&db, "v", Some(&top.id), "top.md", &["x"]).await;
+        add_source_in(&db, "v", Some(&inner.id), "inner.md", &["y"]).await;
         add_source(&db, "unrelated.md", &["z"]).await;
 
         move_folder_to_vault(&db, "u", &top.id, &other.id).await.expect("move");
@@ -983,23 +915,18 @@ mod search_tests {
             .into_iter()
             .map(|s| s.title)
             .collect();
-        assert_eq!(moved, vec!["sets.md", "syllabus.md"]);
+        assert_eq!(moved, vec!["inner.md", "top.md"]);
         assert_eq!(list_folders(&db, &other.id).await.expect("folders").len(), 2);
         assert_eq!(list_sources(&db, "v").await.expect("list").len(), 1);
     }
 }
 
-// ---------------------------------------------------------- conversations
-
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Conversation {
     pub id: String,
     pub owner_id: String,
-    /// The vault whose sources it searches. Opening it opens that vault.
     pub vault_id: Option<String>,
     pub title: String,
-    /// Set once the conversation has been compacted. Stands in for every
-    /// message marked `compacted` when the next prompt is assembled.
     pub summary: Option<String>,
     pub summarized_at: Option<String>,
     pub created_at: String,
@@ -1042,7 +969,6 @@ pub async fn get_conversation(
     .await
 }
 
-/// One row per conversation for the sidebar, newest first.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ConversationSummary {
     pub id: String,
@@ -1093,8 +1019,7 @@ pub async fn delete_conversation(db: &Db, owner: &str, id: &str) -> sqlx::Result
     Ok(())
 }
 
-/// Fold everything said so far into `summary` and mark it compacted. The rows
-/// stay so the transcript still reads in full.
+// rows stay marked, only the prompt stops carrying them
 pub async fn compact_conversation(
     db: &Db,
     owner: &str,
@@ -1139,19 +1064,13 @@ pub struct StoredMessage {
     pub citations: Option<String>,
     pub compacted: bool,
     pub model: Option<String>,
-    /// Present on assistant turns, so reopening a conversation can restore the
-    /// context meter rather than showing zero.
+    // stored so reopening restores the context meter
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
-    /// The model's reasoning before this answer, and how long it took, when it
-    /// exposed any. Shown on reopening, never sent back to the model.
+    // shown on reopen, never sent back to the model
     pub thinking: Option<String>,
     pub thinking_ms: Option<i64>,
-    /// The steps the turn took before this answer, as JSON: stretches of
-    /// reasoning and tool calls, in order. See `routes::chat::TraceStep`.
     pub trace: Option<String>,
-    /// The files a question was asked about, as JSON: id, title and kind,
-    /// kept as they were when it was asked.
     pub attachments: Option<String>,
     pub created_at: String,
 }
@@ -1196,9 +1115,6 @@ pub async fn append_message(
     Ok(id)
 }
 
-/// The reasoning behind an assistant turn, kept beside the answer rather than
-/// in it: shown when the conversation is reopened, never sent back to the
-/// model, never searched.
 pub async fn set_message_thinking(
     db: &Db,
     id: &str,
@@ -1214,7 +1130,6 @@ pub async fn set_message_thinking(
     Ok(())
 }
 
-/// The steps behind an assistant turn, kept for display like its reasoning.
 pub async fn set_message_trace(db: &Db, id: &str, trace: &str) -> sqlx::Result<()> {
     sqlx::query("UPDATE messages SET trace = ?2 WHERE id = ?1")
         .bind(id)
@@ -1224,7 +1139,6 @@ pub async fn set_message_trace(db: &Db, id: &str, trace: &str) -> sqlx::Result<(
     Ok(())
 }
 
-/// The files a question was asked about, kept with it.
 pub async fn set_message_attachments(db: &Db, id: &str, files: &str) -> sqlx::Result<()> {
     sqlx::query("UPDATE messages SET attachments = ?2 WHERE id = ?1")
         .bind(id)
@@ -1234,7 +1148,6 @@ pub async fn set_message_attachments(db: &Db, id: &str, files: &str) -> sqlx::Re
     Ok(())
 }
 
-/// Everything ever said, for display.
 pub async fn conversation_messages(db: &Db, id: &str) -> sqlx::Result<Vec<StoredMessage>> {
     sqlx::query_as::<_, StoredMessage>(
         "SELECT * FROM messages WHERE conversation_id = ?1 ORDER BY created_at, id",
@@ -1244,11 +1157,7 @@ pub async fn conversation_messages(db: &Db, id: &str) -> sqlx::Result<Vec<Stored
     .await
 }
 
-/// Unasking a question: the question, whatever it produced and everything said
-/// after it all go, and the question comes back so the caller can decide what
-/// to do with it. Point at an answer and the question behind it is the one that
-/// goes; point at a question and it is that one. Returns None when the message
-/// is not there, or when nothing at or before it was a question.
+// message id can be either end of the exchange: an answer rewinds its question
 #[cfg(test)]
 pub async fn rewind_to_question(
     db: &Db,
@@ -1258,8 +1167,6 @@ pub async fn rewind_to_question(
     Ok(rewind_question(db, conversation_id, message_id).await?.map(|(m, n)| (m.content, n)))
 }
 
-/// Unasking a question, handing back the whole of it: its text and the files
-/// it was asked about, so asking it again asks it about the same files.
 pub async fn rewind_question(
     db: &Db,
     conversation_id: &str,
@@ -1286,7 +1193,6 @@ pub async fn rewind_question(
     Ok(Some((messages[question].clone(), doomed.len())))
 }
 
-/// What the next prompt should carry: only what has not been compacted away.
 pub async fn active_messages(db: &Db, id: &str) -> sqlx::Result<Vec<StoredMessage>> {
     sqlx::query_as::<_, StoredMessage>(
         "SELECT * FROM messages
@@ -1318,18 +1224,17 @@ mod rewind_tests {
         append_message(db, id, role, text, None, None, None).await.expect("message")
     }
 
-    /// A retried or edited question asks about the same files it did before.
     #[tokio::test]
     async fn a_rewound_question_keeps_its_files() {
         let (db, c) = scratch().await;
-        let asked = say(&db, &c, "user", "what is a set?").await;
-        say(&db, &c, "assistant", "a collection").await;
+        let asked = say(&db, &c, "user", "what is a widget?").await;
+        say(&db, &c, "assistant", "a device").await;
         let files = r#"[{"id":"s1","title":"symbols.md","kind":"text"}]"#;
         set_message_attachments(&db, &asked, files).await.expect("files");
 
         let (question, removed) =
             rewind_question(&db, &c, &asked).await.expect("query").expect("rewound");
-        assert_eq!(question.content, "what is a set?");
+        assert_eq!(question.content, "what is a widget?");
         assert_eq!(question.attachments.as_deref(), Some(files));
         assert_eq!(removed, 2);
     }

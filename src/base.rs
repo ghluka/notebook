@@ -1,33 +1,15 @@
-//! Serving the app under a path prefix, the way nginx mounts it one level down
-//! (`https://host/notebook/`).
-//!
-//! Every route in this app is written against the site root: the API lives at
-//! `/api/...`, the login page is `/login`, a conversation permalink is
-//! `/c/{id}`. A reverse proxy that puts all of that under a subdirectory has to
-//! be told about, or nothing lines up: the browser asks for `/notebook/login`,
-//! the router only knows `/login`, and an anonymous caller is refused on the
-//! login page itself.
-//!
-//! So the router mounts the same table twice, at the root and under the prefix,
-//! and every URL the app *emits* carries the prefix: the redirect that sends an
-//! anonymous browser to the login page, the cookie's `Path`, and the HTML that
-//! tells the client where to send its fetches.
-//!
-//! `BASE_PATH` names the prefix. A proxy may instead send `X-Forwarded-Prefix`,
-//! which is honoured when `BASE_PATH` is unset.
+//! routes are written against the root; BASE_PATH (or X-Forwarded-Prefix when unset)
+//! tells the router where a proxy mounts them, and every emitted URL gets the prefix
 
 use axum::http::HeaderMap;
 
-/// Normalise a prefix to `""` or `"/something"`: one leading slash, no
-/// trailing one, no traversal, no query and no fragment. Anything that cannot
-/// be a plain path prefix is refused rather than half honoured, since it ends
-/// up in a `Location` header and a cookie `Path`.
+/// anything not a plain prefix is refused, not half honoured: it ends up in a Location header and cookie Path
 pub fn normalize(raw: &str) -> String {
     let raw = raw.trim();
     if raw.is_empty() {
         return String::new();
     }
-    // A proxy may pass a list; the first entry is the one in front of us.
+    // a proxy may pass a list; the first is the one in front of us
     let raw = raw.split(',').next().unwrap_or("").trim();
     if raw.contains('?') || raw.contains('#') || raw.contains('\\') {
         return String::new();
@@ -50,8 +32,6 @@ pub fn normalize(raw: &str) -> String {
     if out.len() > 200 { String::new() } else { out }
 }
 
-/// The prefix for this request: the configured one wins, otherwise whatever
-/// the proxy declared.
 pub fn effective(configured: &str, headers: &HeaderMap) -> String {
     if !configured.is_empty() {
         return configured.to_string();

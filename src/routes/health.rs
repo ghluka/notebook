@@ -7,8 +7,7 @@ use crate::error::AppResult;
 use crate::models;
 use crate::state::AppState;
 
-/// Reports what the server is configured to talk to and whether the DB answers.
-/// Deliberately says whether a key is *present*, never what it is.
+// says whether a key is present, never what it is
 pub async fn health(State(state): State<AppState>) -> AppResult<Json<Value>> {
     let row = sqlx::query("SELECT count(*) AS n FROM sources WHERE owner_id = ?1")
         .bind(&state.user_id)

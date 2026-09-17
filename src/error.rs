@@ -1,5 +1,3 @@
-//! One error type for every handler.
-
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -17,9 +15,7 @@ pub enum AppError {
     NotFound(String),
     #[error("unsupported: {0}")]
     Unsupported(String),
-    /// The model read the file and answered with something that is not a
-    /// rendition of it, such as a summary. Retrying the same model on another
-    /// path would only produce the same thing, so this is worth telling apart.
+    /// model gave a description instead of a transcription; another path on the same model repeats it
     #[error("{0}")]
     Rendition(String),
     #[error("database: {0}")]
@@ -28,8 +24,6 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("model: {0}")]
     Llm(#[from] crate::llm::LlmError),
-    /// The provider was still rate limited after the full retry schedule.
-    /// Carries the model that failed, so the client can offer to switch.
     #[error("{message}")]
     RateLimited {
         message: String,
@@ -37,15 +31,13 @@ pub enum AppError {
         model_name: Option<String>,
         waited: u64,
     },
-    /// The endpoint will not take this kind of content from this model. The
-    /// client can offer to run the file on another model that will, which is
-    /// the same shape of choice a rate limit offers.
+    /// endpoint refused this kind of content; the client can offer another model
     #[error("{message}")]
     Modality {
         message: String,
         model_id: Option<String>,
         model_name: Option<String>,
-        /// What it would not take: "page images", "audio files".
+        /// what it would not take: "page images", "audio files"
         media: String,
     },
     #[error("{0}")]
@@ -53,8 +45,7 @@ pub enum AppError {
 }
 
 impl AppError {
-    /// The JSON body for this error. `kind` lets the client tell a rate limit
-    /// apart from an ordinary failure without parsing prose.
+    /// kind is a contract: the client switches on it
     pub fn payload(&self) -> serde_json::Value {
         match self {
             AppError::Unauthorized(message) => json!({
@@ -87,13 +78,10 @@ impl AppError {
         matches!(self, AppError::Rendition(_))
     }
 
-    /// The endpoint refused the kind of content, not the request. Sending the
-    /// same file another way to the same model only earns the same refusal.
     pub fn is_modality_refusal(&self) -> bool {
         matches!(self, AppError::Llm(e) if e.rejects_modality())
     }
 
-    /// What the provider actually said, for messages meant to be read.
     pub fn provider_message(&self) -> String {
         match self {
             AppError::Llm(e) => e.provider_message(),
@@ -101,7 +89,6 @@ impl AppError {
         }
     }
 
-    /// Wrap a provider rate limit with the model it happened on.
     pub fn from_rate_limit(
         error: crate::llm::LlmError,
         model_id: &str,
@@ -151,7 +138,6 @@ impl IntoResponse for AppError {
 mod tests {
     use super::*;
 
-    /// The client keys off `kind`, so these payloads are a contract.
     #[test]
     fn a_failure_the_client_can_act_on_says_so() {
         let modality = AppError::Modality {
@@ -167,7 +153,6 @@ mod tests {
         assert!(payload["error"].as_str().unwrap().contains("does not accept page images"));
         assert!(!modality.is_modality_refusal(), "this is the refusal itself, not one carrying an LlmError");
 
-        // An ordinary failure carries no kind, so the client just reports it.
         let plain = AppError::Unsupported("no".into());
         assert!(plain.payload().get("kind").is_none());
     }

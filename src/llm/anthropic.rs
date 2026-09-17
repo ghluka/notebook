@@ -1,5 +1,3 @@
-//! Anthropic-style `/v1/messages`.
-
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -60,7 +58,7 @@ impl AnthropicProvider {
     fn build_body(req: &ChatRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
         for m in &req.messages {
-            // Anthropic has no `tool` role: tool results ride on a user turn.
+            // no `tool` role in anthropic: tool results ride on a user turn
             let role = match m.role {
                 Role::Assistant => "assistant",
                 Role::User | Role::Tool => "user",
@@ -75,7 +73,7 @@ impl AnthropicProvider {
             messages.push(json!({ "role": role, "content": content }));
         }
 
-        // Thinking needs headroom above the budget, and forbids temperature.
+        // thinking needs max_tokens above the budget, and forbids temperature
         let budget = req.effort.budget_tokens();
         let max_tokens = match budget {
             Some(b) => req.max_tokens.max(b + 1024),
@@ -202,9 +200,7 @@ impl LlmProvider for AnthropicProvider {
             return Err(LlmError::Api { status: status.as_u16(), body: raw, retry_after: None });
         }
 
-        // Same shape as the OpenAI pump: the handshake above stays retryable,
-        // everything below ends the turn, and dropping the stream stops the
-        // task with its provider connection.
+        // handshake above stays retryable, everything below ends the turn; dropping the stream stops the task
         let (tx, rx) = futures::channel::mpsc::unbounded();
         tokio::spawn(async move {
             let mut bytes = resp.bytes_stream();
@@ -225,8 +221,7 @@ impl LlmProvider for AnthropicProvider {
                     }
                 }
             }
-            // A well-formed stream closes with message_stop; anything else
-            // lost data on the wire.
+            // a well-formed stream closes with message_stop, so anything still buffered is lost data
             buf.push_str("\n\n");
             for rec in split_sse_records(&mut buf) {
                 if pump_anthropic_record(&tx, &mut state, &rec) {
@@ -241,7 +236,6 @@ impl LlmProvider for AnthropicProvider {
     }
 }
 
-/// Forwards one record's event, if any. True when the turn is over.
 fn pump_anthropic_record(
     tx: &futures::channel::mpsc::UnboundedSender<Result<StreamEvent, LlmError>>,
     state: &mut AnthropicStreamState,
@@ -261,7 +255,6 @@ fn pump_anthropic_record(
     }
 }
 
-/// Tool input fragments in flight, keyed by content block index.
 #[derive(Debug, Default)]
 struct AnthropicStreamState {
     tools: std::collections::BTreeMap<u64, AnthropicToolBuilder>,
@@ -276,9 +269,6 @@ struct AnthropicToolBuilder {
     input: String,
 }
 
-/// Fold one SSE record into text, tool fragments and usage. `message_stop`
-/// closes the turn with everything accumulated alongside it. Anything else
-/// (pings, block opens and closes) yields nothing on its own.
 fn feed_anthropic_record(
     state: &mut AnthropicStreamState,
     rec: &SseRecord,
@@ -308,7 +298,7 @@ fn feed_anthropic_record(
                     Some(t) if !t.is_empty() => Ok(Some(StreamEvent::Text(t.to_string()))),
                     _ => Ok(None),
                 },
-                // Extended thinking streams as its own block, before the answer.
+                // thinking streams as its own block before the answer
                 Some("thinking_delta") => match delta["thinking"].as_str() {
                     Some(t) if !t.is_empty() => Ok(Some(StreamEvent::Thinking(t.to_string()))),
                     _ => Ok(None),
@@ -335,7 +325,7 @@ fn feed_anthropic_record(
                 .map(|b| ToolCall {
                     id: b.id.clone(),
                     name: b.name.clone(),
-                    // Same leniency as chat(): broken JSON becomes Null.
+                    // same leniency as chat(): broken json becomes Null
                     arguments: serde_json::from_str(&b.input).unwrap_or(Value::Null),
                     signature: None,
                 })
@@ -378,7 +368,7 @@ mod tests {
         .unwrap();
         assert!(matches!(text, Some(StreamEvent::Text(ref t)) if t == "hi"));
 
-        // Reasoning streams on its own channel, never as answer text.
+        // reasoning streams on its own channel, never as answer text
         let thought = feed_anthropic_record(
             &mut state,
             &record(
@@ -419,7 +409,7 @@ mod tests {
             ),
             (
                 "content_block_delta",
-                r#"{"index":1,"delta":{"type":"input_json_delta","partial_json":"\"fuchs.pdf\"}"}}"#,
+                r#"{"index":1,"delta":{"type":"input_json_delta","partial_json":"\"textbook.pdf\"}"}}"#,
             ),
         ] {
             assert!(feed_anthropic_record(&mut state, &record(event, data)).unwrap().is_none());
@@ -428,7 +418,7 @@ mod tests {
             Some(StreamEvent::Done(d)) => {
                 assert_eq!(d.tool_calls.len(), 1);
                 assert_eq!(d.tool_calls[0].name, "read_source");
-                assert_eq!(d.tool_calls[0].arguments["title"], "fuchs.pdf");
+                assert_eq!(d.tool_calls[0].arguments["title"], "textbook.pdf");
             }
             other => panic!("expected Done, got {other:?}"),
         }

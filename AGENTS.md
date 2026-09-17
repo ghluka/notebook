@@ -216,8 +216,8 @@ Three panes, in the NotebookLM arrangement: explorer, conversation, viewer.
   the citation and leaves `\ \]` behind as text.
 - **What the model did is shown between the question and the answer.** Each
   stretch of reasoning and each tool call is one quiet line, in the order they
-  happened: "Thought for 12 seconds", "Searched cardinality", "Read
-  02SetsAndPropositions.pdf from line 1". The line has no box of its own and its
+  happened: "Thought for 12 seconds", "Searched volcanoes", "Read
+  notes.pdf from line 1". The line has no box of its own and its
   chevron sits after the label; opening it shows the detail in a rounded card
   underneath: the reasoning itself, or what the call found (a search's files and
   lines, a read's line range, from `tool_found`). Reasoning streams on a channel
@@ -526,7 +526,7 @@ mean the same thing, and all of them pass if you wait.
 - **A follow-up that names nothing is searched with the exchange before it.**
   "can you summarize it?" has one searchable word, so searching it alone finds
   junk, and a small model answers from whatever it is handed: it once
-  summarised a textbook chapter on cardinality instead of the reading the
+  summarised a textbook chapter on volcanoes instead of the reading the
   previous answer had just named. `retrieval_query` adds the last answer and
   the last question to any question with fewer than two searchable words
   (`db::search_words`), with citation marks taken out so a file the
@@ -581,7 +581,7 @@ mean the same thing, and all of them pass if you wait.
   anyway rather than returning nothing.
 - The researcher prompt has two rules that exist because models broke them:
   cite by copying the bracketed label printed above each excerpt
-  (`[08NumberTheoryII.pdf, p. 12]`), and open with the answer, never with
+  (`[notes.pdf, p. 12]`), and open with the answer, never with
   "From the provided excerpts". The excerpt block is formatted to teach the
   citation format by example; it used XML attributes once and models echoed
   `source_title="..."` into their prose. Do not reintroduce key=value syntax

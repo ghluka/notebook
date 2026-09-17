@@ -1,5 +1,3 @@
-//! Environment-driven configuration. See AGENTS.md §6 for the full table.
-
 use std::env;
 use std::path::PathBuf;
 
@@ -28,9 +26,7 @@ pub struct Config {
     pub database_url: String,
     pub upload_dir: PathBuf,
     pub max_upload_bytes: usize,
-    /// The URL prefix this is mounted under when a reverse proxy serves it from
-    /// a subdirectory, such as `/notebook`. Empty means the site root. See
-    /// `crate::base`.
+    /// url prefix when a proxy serves this from a subdirectory, empty is the root
     pub base_path: String,
 
     pub anthropic_api_key: String,

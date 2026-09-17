@@ -1,16 +1,5 @@
-//! OpenAI-style `/responses`, the newer of OpenAI's two wire formats.
-//!
-//! `openai.rs` decides which format a request goes out in and does the HTTP;
-//! this file only translates. Responses carries the same conversation as chat
-//! completions in a different shape. The system prompt is `instructions`. The
-//! history is a flat list of `input` items, where a tool call and its result
-//! are items in their own right rather than fields hanging off a message. And
-//! reasoning comes back as an item beside the answer instead of a field inside
-//! it, which is how LM Studio, NVIDIA and DeepSeek all return it.
-//!
-//! Audio and video have no part type in this format at all, so requests that
-//! carry them stay on chat completions, where the `audio_url` and `video_url`
-//! extension lives. `can_carry` is that test.
+//! openai /responses translation: system prompt is `instructions`, history is a flat
+//! list of `input` items, reasoning an item beside the answer. no audio/video parts here.
 
 use std::collections::BTreeMap;
 
@@ -19,7 +8,6 @@ use serde_json::{Value, json};
 use super::types::*;
 use super::{LlmError, SseRecord, mentions_rate_limit};
 
-/// Whether this request can be said in this format at all.
 pub fn can_carry(req: &ChatRequest) -> bool {
     !req.messages
         .iter()
@@ -37,9 +25,7 @@ pub fn build_body(req: &ChatRequest) -> Result<Value, LlmError> {
         "model": req.model,
         "input": input,
         "max_output_tokens": req.max_tokens,
-        // Every request carries its whole history, so nothing needs keeping on
-        // the provider's side, and a notebook's sources have no business sitting
-        // in someone else's request log by default.
+        // store false: the whole history is resent, and sources shouldn't sit in a provider log
         "store": false,
     });
     if let Some(system) = &req.system {
@@ -53,7 +39,7 @@ pub fn build_body(req: &ChatRequest) -> Result<Value, LlmError> {
         body["reasoning"] = json!({ "effort": req.effort.as_str() });
     }
     if !req.tools.is_empty() {
-        // Flat, unlike chat completions, which nests these under `function`.
+        // flat here, unlike chat completions which nests under function
         body["tools"] = json!(
             req.tools
                 .iter()
@@ -69,8 +55,6 @@ pub fn build_body(req: &ChatRequest) -> Result<Value, LlmError> {
     Ok(body)
 }
 
-/// One neutral message becomes up to three kinds of item: the message itself,
-/// then any calls it made, while results for earlier calls stand on their own.
 fn push_items(out: &mut Vec<Value>, m: &Message) -> Result<(), LlmError> {
     let mut parts: Vec<Value> = Vec::new();
     let mut said: Vec<&str> = Vec::new();
@@ -113,9 +97,7 @@ fn push_items(out: &mut Vec<Value>, m: &Message) -> Result<(), LlmError> {
     }
 
     match m.role {
-        // What the model said before goes back as a plain string: `input_text`
-        // is refused on an assistant turn, and a string is the one shape every
-        // implementation accepts there.
+        // input_text is refused on an assistant turn; a string is the shape all accept
         Role::Assistant => {
             if parts.len() != said.len() {
                 return Err(LlmError::Request(
@@ -128,8 +110,7 @@ fn push_items(out: &mut Vec<Value>, m: &Message) -> Result<(), LlmError> {
         }
         role => {
             if !parts.is_empty() {
-                // Bare text on a tool turn has nowhere else to go, same as in
-                // chat completions: it is user context.
+                // bare text on a tool turn becomes user context, as in chat completions
                 let role = if role == Role::System { "system" } else { "user" };
                 out.push(json!({ "role": role, "content": parts }));
             }
@@ -139,7 +120,6 @@ fn push_items(out: &mut Vec<Value>, m: &Message) -> Result<(), LlmError> {
     Ok(())
 }
 
-/// A finished response, as the neutral type.
 pub fn parse_response(v: &Value, requested_model: &str) -> Result<ChatResponse, LlmError> {
     if let Some(failure) = failure_of(v) {
         return Err(failure);
@@ -157,15 +137,14 @@ pub fn parse_response(v: &Value, requested_model: &str) -> Result<ChatResponse, 
         }
     }
     let mut text = text.into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n");
-    // A convenience field some servers add. The items are the authority.
+    // convenience field some servers add; the items are the authority
     if text.is_empty()
         && let Some(t) = v["output_text"].as_str()
     {
         text = t.to_string();
     }
 
-    // Named the way chat completions names them, so nothing downstream has to
-    // know which format the answer arrived in.
+    // named as chat completions names them so nothing downstream learns the format
     let stop_reason = match v["status"].as_str() {
         Some("incomplete") => match v["incomplete_details"]["reason"].as_str() {
             Some("max_output_tokens") | None => "length".to_string(),
@@ -185,8 +164,7 @@ pub fn parse_response(v: &Value, requested_model: &str) -> Result<ChatResponse, 
     })
 }
 
-/// A message item's text. Content is usually a list of parts but a bare
-/// string has been seen too. A refusal is what the model said, so it counts.
+// content is usually parts but a bare string shows up too; a refusal counts as what was said
 fn message_text(item: &Value) -> String {
     match &item["content"] {
         Value::String(s) => s.clone(),
@@ -202,8 +180,7 @@ fn message_text(item: &Value) -> String {
     }
 }
 
-/// OpenAI exposes reasoning as a `summary`; LM Studio, NVIDIA and DeepSeek
-/// send the reasoning itself as `reasoning_text` content. Either will do.
+// openai exposes reasoning as a summary; lm studio, nvidia, deepseek send reasoning_text
 fn reasoning_text(item: &Value) -> Vec<String> {
     ["summary", "content"]
         .iter()
@@ -216,7 +193,7 @@ fn reasoning_text(item: &Value) -> Vec<String> {
 
 fn call_of(item: &Value) -> ToolCall {
     ToolCall {
-        // `call_id` is what the result has to answer to; `id` names the item.
+        // call_id is what the result answers to; id names the item
         id: item["call_id"].as_str().or(item["id"].as_str()).unwrap_or_default().to_string(),
         name: item["name"].as_str().unwrap_or_default().to_string(),
         arguments: parse_arguments(&item["arguments"]),
@@ -224,8 +201,7 @@ fn call_of(item: &Value) -> ToolCall {
     }
 }
 
-/// Arguments arrive as a JSON string, as in chat completions, and a broken one
-/// becomes null the same way. An object is taken as it is.
+// arguments arrive as a JSON string like chat completions; a broken one becomes null
 fn parse_arguments(raw: &Value) -> Value {
     match raw {
         Value::String(s) => serde_json::from_str(s).unwrap_or(Value::Null),
@@ -241,9 +217,7 @@ fn usage_of(u: &Value) -> Usage {
     }
 }
 
-/// A 200 is not always a success in this format: a response can report its
-/// own failure, and an older LM Studio answers a route it does not have with a
-/// 200 and an error string.
+// a 200 can still report its own failure, and old LM Studio answers a missing route this way
 pub(super) fn failure_of(v: &Value) -> Option<LlmError> {
     let error = &v["error"];
     let failed = v["status"].as_str() == Some("failed");
@@ -254,8 +228,6 @@ pub(super) fn failure_of(v: &Value) -> Option<LlmError> {
     Some(LlmError::Api { status: failure_status(error), body, retry_after: None })
 }
 
-/// The HTTP status a failure reported inside a body amounts to, so the retry
-/// and fallback rules treat it as they would the real thing.
 fn failure_status(error: &Value) -> u16 {
     let said = match error {
         Value::String(s) => s.to_ascii_lowercase(),
@@ -273,14 +245,11 @@ fn failure_status(error: &Value) -> u16 {
     }
 }
 
-/// What a streamed response has accumulated so far.
 #[derive(Debug, Default)]
 pub struct StreamState {
-    /// Calls in flight, keyed by the output slot they occupy, so they come out
-    /// in the order the model made them.
+    // keyed by output slot so calls come out in the order the model made them
     calls: BTreeMap<u64, CallBuilder>,
-    /// Whether any answer text has gone out yet. A server that only ever sends
-    /// the finished text still gets its answer through, exactly once.
+    // a server that only sends the finished text still gets it through, exactly once
     streamed_text: bool,
 }
 
@@ -292,8 +261,7 @@ struct CallBuilder {
 }
 
 impl CallBuilder {
-    /// Take what a `function_call` item says. The finished item is the
-    /// authority on arguments; the opening one usually has none yet.
+    // the finished item is the authority on arguments; the opening one usually has none yet
     fn fill(&mut self, item: &Value, finished: bool) {
         if let Some(id) = item["call_id"].as_str() {
             self.id = id.to_string();
@@ -313,20 +281,13 @@ impl CallBuilder {
     }
 }
 
-/// Fold one SSE record into the events it amounts to. A record yields at most
-/// a piece of text and the close of the turn, in that order.
-///
-/// Implementations differ in how much they stream. OpenAI streams argument
-/// deltas; LM Studio sends a call's arguments only once they are complete. So
-/// every event that can carry a call is read, and the latest complete value
-/// wins over whatever the deltas built up.
+// openai streams argument deltas, lm studio sends them whole; latest complete value wins
 pub fn feed(state: &mut StreamState, rec: &SseRecord) -> Result<Vec<StreamEvent>, LlmError> {
     if rec.data.trim() == "[DONE]" {
         return Ok(vec![finish(state, &Value::Null)]);
     }
     let v: Value = serde_json::from_str(&rec.data)?;
-    // The event name rides on the `event:` line and again inside the payload;
-    // the payload is the copy every implementation sends.
+    // the payload carries the event name too, and that is the copy every implementation sends
     let kind = v["type"].as_str().or(rec.event.as_deref()).unwrap_or_default();
     let slot = v["output_index"].as_u64().unwrap_or(0);
 
@@ -346,9 +307,7 @@ pub fn feed(state: &mut StreamState, rec: &SseRecord) -> Result<Vec<StreamEvent>
             }
             _ => Ok(Vec::new()),
         },
-        // Reasoning, as it is thought. LM Studio, NVIDIA and DeepSeek stream
-        // the reasoning itself, OpenAI a summary of it; either way it is not
-        // the answer, and it goes out on its own channel.
+        // reasoning goes on its own channel; lm studio/nvidia/deepseek send the text, openai a summary
         "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
             match v["delta"].as_str() {
                 Some(d) if !d.is_empty() => Ok(vec![StreamEvent::Thinking(d.to_string())]),
@@ -398,7 +357,6 @@ pub fn feed(state: &mut StreamState, rec: &SseRecord) -> Result<Vec<StreamEvent>
             body: v.to_string(),
             retry_after: None,
         })),
-        // OpenAI's stream-level error carries its fields at the top.
         "error" => {
             let error = json!({ "message": v["message"], "code": v["code"] });
             Err(LlmError::Api {
@@ -411,8 +369,7 @@ pub fn feed(state: &mut StreamState, rec: &SseRecord) -> Result<Vec<StreamEvent>
     }
 }
 
-/// Close the turn. A server that never streamed its calls still lists them in
-/// the final response, so that is read too when nothing else arrived.
+// a server that never streamed its calls still lists them in the final response
 fn finish(state: &mut StreamState, response: &Value) -> StreamEvent {
     if state.calls.is_empty() {
         for (i, item) in response["output"].as_array().into_iter().flatten().enumerate() {
@@ -518,7 +475,6 @@ mod tests {
         assert_eq!(input[0]["content"][1]["image_url"], "data:image/png;base64,AAAA");
         assert_eq!(input[0]["content"][2]["type"], "input_file");
         assert_eq!(input[0]["content"][2]["filename"], "notes.pdf");
-        // What it said, then the call it made, then the answer to that call.
         assert_eq!(input[1], json!({ "role": "assistant", "content": "Let me look." }));
         assert_eq!(input[2]["type"], "function_call");
         assert_eq!(input[2]["call_id"], "call_1");
@@ -544,8 +500,6 @@ mod tests {
         }
     }
 
-    /// LM Studio's answer to "say ok" with 16 tokens to spare: all of them went
-    /// on reasoning, and that is the whole of the output.
     #[test]
     fn a_response_cut_short_while_reasoning_says_so() {
         let v = json!({
@@ -593,7 +547,6 @@ mod tests {
 
     #[test]
     fn a_failure_inside_a_200_is_still_a_failure() {
-        // An older LM Studio, asked for a route it does not have.
         let missing = json!({ "error": "Unexpected endpoint or method. (POST /v1/responses)" });
         match parse_response(&missing, "m").unwrap_err() {
             LlmError::Api { status, .. } => assert_eq!(status, 404, "so the fallback fires"),
@@ -607,8 +560,6 @@ mod tests {
         assert_eq!(err.provider_message(), "slow down");
     }
 
-    /// The shape LM Studio actually streamed for a tool call: reasoning deltas,
-    /// then the call announced empty, then its arguments whole, never in deltas.
     #[test]
     fn a_call_that_arrives_whole_is_assembled() {
         let mut state = StreamState::default();
@@ -634,7 +585,6 @@ mod tests {
         assert_eq!((done.input_tokens, done.output_tokens), (283, 17));
     }
 
-    /// OpenAI's shape: text deltas, and a call whose arguments stream in pieces.
     #[test]
     fn deltas_are_streamed_and_assembled() {
         let mut state = StreamState::default();

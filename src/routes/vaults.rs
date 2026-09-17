@@ -1,6 +1,4 @@
-//! Vaults: separate libraries, one open at a time. The open one is what the
-//! explorer lists, what the chat list shows, and what a new conversation
-//! searches.
+//! separate libraries, one open at a time
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -11,7 +9,6 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-/// `GET /api/vaults` lists every vault with what it holds, and which is open.
 pub async fn list(State(state): State<AppState>) -> AppResult<Json<Value>> {
     Ok(Json(listing(&state).await?))
 }
@@ -46,8 +43,6 @@ pub async fn rename(
     Ok(Json(json!({ "id": vault.id, "name": name })))
 }
 
-/// `POST /api/vaults/{id}/open` makes this the vault everything else sees, and
-/// answers with the same listing as `GET /api/vaults`.
 pub async fn open(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -57,10 +52,7 @@ pub async fn open(
     Ok(Json(listing(&state).await?))
 }
 
-/// Deleting a vault deletes what is in it: sources with their renditions,
-/// folders and conversations. A stored file goes too unless a source in some
-/// other vault shares its bytes. The last vault cannot go, since an upload
-/// always needs somewhere to land.
+// deletes its sources, folders and conversations; blobs go only when no other vault shares them
 pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -87,7 +79,6 @@ pub async fn delete(
     Ok(Json(json!({ "deleted": vault.id, "sources": sources.len() })))
 }
 
-/// Trimmed, not empty, and not the name of another of this user's vaults.
 async fn usable_name(state: &AppState, name: &str, except: Option<&str>) -> AppResult<String> {
     let name = name.trim();
     if name.is_empty() {
@@ -96,7 +87,7 @@ async fn usable_name(state: &AppState, name: &str, except: Option<&str>) -> AppR
     if name.chars().count() > 80 {
         return Err(AppError::BadRequest("keep the name under 80 characters".into()));
     }
-    // The unique index compares ASCII case-insensitively, and so does this.
+    // the unique index is ASCII case-insensitive, so match that
     let taken = db::list_vaults(&state.db, &state.user_id)
         .await?
         .iter()

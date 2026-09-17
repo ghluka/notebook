@@ -1,16 +1,5 @@
-//! OpenAI-style endpoints, which come in two wire formats.
-//!
-//! `/responses` is tried first. It is where OpenAI is taking the API, and LM
-//! Studio and DeepSeek serve it; its translation lives in `responses.rs`.
-//! `/chat/completions` is the fallback, for endpoints that do not have the
-//! newer route (Google's compatibility layer answers it with a 404) and for
-//! audio and video, which only the older format can carry.
-//!
-//! Support is decided per model, not per endpoint: NVIDIA's gateway serves
-//! `/responses` for some of its models and 404s it for others. So the answer
-//! is learned on the first request for each model on each endpoint and
-//! remembered for the life of the process, which makes the fallback cost one
-//! request per model, not one per turn.
+//! openai-style endpoints in two wire formats: /responses first, /chat/completions
+//! as fallback. support is per model, not per endpoint, and remembered per process.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -22,8 +11,6 @@ use serde_json::{Value, json};
 use super::types::*;
 use super::{LlmError, LlmProvider, SseRecord, TokenStream, responses, split_sse_records};
 
-/// Whether `/responses` has been found to serve a model, keyed by base URL and
-/// model id. Absent means not tried yet.
 static SPEAKS_RESPONSES: LazyLock<Mutex<HashMap<(String, String), bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -52,24 +39,16 @@ impl OpenAiProvider {
         }
     }
 
-    /// Whether this request should go to `/responses` first.
     fn try_responses(&self, req: &ChatRequest) -> bool {
         responses::can_carry(req) && self.remembered(&req.model) != Some(false)
     }
 
-    /// Whether a failure on `/responses` means the route is missing for this
-    /// model rather than the request being wrong. Once the model is known to be
-    /// served there, a 404 is about something else, and falling back would
-    /// only hide it.
+    // once a model is known served there, a 404 is something else; falling back would hide it
     fn should_fall_back(&self, model: &str, e: &LlmError) -> bool {
         self.remembered(model) != Some(true) && lacks_route(e)
     }
 
-    /// POST with the key when there is one. A failing status comes back as an
-    /// error carrying the body and any `Retry-After`, so both formats treat
-    /// failures, and rate limits in particular, the same way.
     async fn post(&self, path: &str, body: &Value) -> Result<reqwest::Response, LlmError> {
-        // A local endpoint (LM Studio, Ollama, vLLM) takes no key at all.
         let mut builder = self.http.post(format!("{}{path}", self.base_url));
         if !self.api_key.is_empty() {
             builder = builder.bearer_auth(&self.api_key);
@@ -89,8 +68,6 @@ impl OpenAiProvider {
         Err(LlmError::Api { status: status.as_u16(), body: raw, retry_after })
     }
 
-    /// OpenAI splits one neutral message into possibly several wire messages:
-    /// each tool result is its own `role: "tool"` entry.
     fn push_message(out: &mut Vec<Value>, m: &Message) -> Result<(), LlmError> {
         let mut parts: Vec<Value> = Vec::new();
         let mut tool_calls: Vec<Value> = Vec::new();
@@ -109,8 +86,7 @@ impl OpenAiProvider {
                         "file_data": format!("data:{media_type};base64,{data}")
                     }
                 })),
-                // vLLM / Nemotron Omni style: data URIs work without sharing a
-                // filesystem with the server, unlike `file://` URIs.
+                // data URIs work without sharing a filesystem, unlike file:// uris
                 ContentPart::Audio { media_type, data } => parts.push(json!({
                     "type": "audio_url",
                     "audio_url": { "url": format!("data:{media_type};base64,{data}") }
@@ -125,9 +101,7 @@ impl OpenAiProvider {
                         "type": "function",
                         "function": { "name": name, "arguments": input.to_string() }
                     });
-                    // Gemini rejects a history whose function calls come back
-                    // unsigned ("missing a thought_signature"), so whatever it
-                    // signed the call with goes back exactly where it came from.
+                    // gemini 400s ("missing a thought_signature") if a signed call goes back unsigned
                     if let Some(signature) = signature {
                         call["extra_content"] =
                             json!({ "google": { "thought_signature": signature } });
@@ -150,7 +124,7 @@ impl OpenAiProvider {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
-            // Bare text on a Tool turn has nowhere to go; treat it as user context.
+            // bare text on a tool turn has nowhere to go; treated as user context
             Role::Tool => "user",
         };
         let mut msg = json!({ "role": role });
@@ -220,7 +194,7 @@ impl OpenAiProvider {
     async fn chat_completions_stream(&self, req: &ChatRequest) -> Result<TokenStream, LlmError> {
         let mut body = Self::build_body(req)?;
         body["stream"] = json!(true);
-        // Without this most servers omit usage from streamed chunks.
+        // most servers omit usage from streamed chunks without this
         body["stream_options"] = json!({ "include_usage": true });
         let resp = self.post("/chat/completions", &body).await?;
         Ok(pump(resp, OpenAiStreamState::default(), feed_chat, "the stream ended before [DONE]"))
@@ -231,8 +205,7 @@ impl OpenAiProvider {
         body["stream"] = json!(true);
         let resp = self.post("/responses", &body).await?;
 
-        // A JSON body where a stream was asked for is an answer in the wrong
-        // shape, and an older LM Studio says "no such route" exactly this way.
+        // a json body where a stream was asked for; old LM Studio says no-such-route this way
         let is_json = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -275,7 +248,6 @@ impl LlmProvider for OpenAiProvider {
                     "no /responses for this model; using /chat/completions"
                 );
                 let out = self.chat_completions(req).await;
-                // Only a fallback that worked proves the route was the problem.
                 if out.is_ok() {
                     self.remember(&req.model, false);
                 }
@@ -310,9 +282,6 @@ impl LlmProvider for OpenAiProvider {
     }
 }
 
-/// Whether a failure says the route itself is missing. Servers and proxies word
-/// it differently, so the status is the reliable part and the words only
-/// decide the ambiguous 400.
 fn lacks_route(e: &LlmError) -> bool {
     match e {
         LlmError::Api { status: 404 | 405 | 501, .. } => true,
@@ -326,7 +295,6 @@ fn lacks_route(e: &LlmError) -> bool {
     }
 }
 
-/// A finished chat completion, as the neutral type.
 fn parse_chat_completion(v: &Value, requested_model: &str) -> ChatResponse {
     let choice = &v["choices"][0];
     let message = &choice["message"];
@@ -339,7 +307,7 @@ fn parse_chat_completion(v: &Value, requested_model: &str) -> ChatResponse {
                 .map(|c| ToolCall {
                     id: c["id"].as_str().unwrap_or_default().to_string(),
                     name: c["function"]["name"].as_str().unwrap_or_default().to_string(),
-                    // OpenAI sends arguments as a JSON *string*.
+                    // openai sends arguments as a JSON string
                     arguments: c["function"]["arguments"]
                         .as_str()
                         .and_then(|s| serde_json::from_str(s).ok())
@@ -351,8 +319,7 @@ fn parse_chat_completion(v: &Value, requested_model: &str) -> ChatResponse {
         .unwrap_or_default();
 
     ChatResponse {
-        // Some servers return content as a string, others as an array of
-        // `{ "type": "text", "text": ... }` parts.
+        // content is a string on some servers, an array of text parts on others
         text: match &message["content"] {
             Value::String(s) => s.clone(),
             Value::Array(arr) => arr
@@ -377,15 +344,9 @@ fn parse_chat_completion(v: &Value, requested_model: &str) -> ChatResponse {
 }
 
 type Sender = futures::channel::mpsc::UnboundedSender<Result<StreamEvent, LlmError>>;
-/// Turns one SSE record into the events it amounts to, for one wire format.
 type Feed<S> = fn(&mut S, &SseRecord) -> Result<Vec<StreamEvent>, LlmError>;
 
-/// Forward a provider's SSE body as events, whichever format it is in.
-///
-/// The handshake is done by the time this runs, so establishment errors stay
-/// retryable while everything from here on ends the turn instead. Dropping the
-/// stream (a stopped turn) drops the receiver, the sends fail, and the task and
-/// its provider connection go with it.
+// handshake is done, so errors here end the turn; a dropped stream kills the provider call
 fn pump<S: Send + 'static>(
     resp: reqwest::Response,
     mut state: S,
@@ -411,8 +372,7 @@ fn pump<S: Send + 'static>(
                 }
             }
         }
-        // Flush whatever the body ended with. A well-formed stream closes the
-        // turn itself; ending without that means data was lost on the wire.
+        // flush trailing bytes; a well formed stream closes itself, ending without that means data was lost
         buf.push_str("\n\n");
         for rec in split_sse_records(&mut buf) {
             if forward(&tx, &mut state, feed, &rec) {
@@ -424,7 +384,6 @@ fn pump<S: Send + 'static>(
     Box::pin(rx)
 }
 
-/// Send one record's events. True when the turn is over, by close or by error.
 fn forward<S>(tx: &Sender, state: &mut S, feed: Feed<S>, rec: &SseRecord) -> bool {
     match feed(state, rec) {
         Ok(events) => {
@@ -448,13 +407,10 @@ fn feed_chat(state: &mut OpenAiStreamState, rec: &SseRecord) -> Result<Vec<Strea
     feed_openai_record(state, rec).map(|ev| ev.into_iter().collect())
 }
 
-/// Tool call fragments in flight, keyed by their `index`.
 #[derive(Debug, Default)]
 struct OpenAiStreamState {
     tools: std::collections::BTreeMap<u64, OpenAiToolBuilder>,
-    /// Where the next call without an `index` goes. Gemini's compatibility
-    /// endpoint omits the field and sends each call whole in one chunk, so
-    /// without this every parallel call would pile into slot 0.
+    // gemini omits index and sends each call whole; without this parallel calls pile into slot 0
     next_slot: u64,
     input_tokens: u32,
     output_tokens: u32,
@@ -468,8 +424,7 @@ struct OpenAiToolBuilder {
     signature: Option<String>,
 }
 
-/// Gemini hangs its per-call thought signature off the tool call itself. The
-/// nesting under `function` has been seen in the wild too, so look in both.
+// gemini hangs the signature off the call; the nested under function spot has been seen too
 fn thought_signature(call: &Value) -> Option<String> {
     for place in [&call["extra_content"], &call["function"]["extra_content"]] {
         if let Some(sig) = place["google"]["thought_signature"].as_str() {
@@ -479,9 +434,7 @@ fn thought_signature(call: &Value) -> Option<String> {
     None
 }
 
-/// The slot a streamed fragment belongs to. An explicit `index` wins; without
-/// one, a fragment that names a function starts a new call and anything else
-/// continues the call in flight.
+// explicit index wins; without one a fragment naming a function starts a new call
 fn tool_slot(state: &mut OpenAiStreamState, tc: &Value) -> u64 {
     if let Some(index) = tc["index"].as_u64() {
         state.next_slot = state.next_slot.max(index + 1);
@@ -495,8 +448,6 @@ fn tool_slot(state: &mut OpenAiStreamState, tc: &Value) -> u64 {
     state.next_slot.saturating_sub(1)
 }
 
-/// Fold one SSE record into text, tool fragments and usage. `[DONE]` closes
-/// the turn with everything accumulated alongside it.
 fn feed_openai_record(
     state: &mut OpenAiStreamState,
     rec: &SseRecord,
@@ -508,7 +459,6 @@ fn feed_openai_record(
             .map(|b| ToolCall {
                 id: b.id.clone(),
                 name: b.name.clone(),
-                // Arguments arrive as JSON *string* fragments, same as chat().
                 arguments: serde_json::from_str(&b.arguments).unwrap_or(Value::Null),
                 signature: b.signature.clone(),
             })
@@ -522,7 +472,6 @@ fn feed_openai_record(
 
     let v: Value = serde_json::from_str(&rec.data)?;
     if let Some(u) = v.get("usage") {
-        // Usage-only chunks carry no choices at all.
         state.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         state.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
     }
@@ -547,10 +496,7 @@ fn feed_openai_record(
     if let Some(t) = delta["content"].as_str().filter(|t| !t.is_empty()) {
         return Ok(Some(StreamEvent::Text(t.to_string())));
     }
-    // Reasoning rides beside the answer in a field of its own: DeepSeek, vLLM
-    // and LM Studio call it `reasoning_content`, OpenRouter and Ollama call it
-    // `reasoning`. It comes before the answer, so in practice the two never
-    // share a chunk.
+    // reasoning rides in reasoning_content (deepseek/vllm/lm studio) or reasoning (openrouter/ollama)
     match delta["reasoning_content"].as_str().or(delta["reasoning"].as_str()) {
         Some(t) if !t.is_empty() => Ok(Some(StreamEvent::Thinking(t.to_string()))),
         _ => Ok(None),
@@ -575,7 +521,6 @@ mod tests {
         .unwrap();
         assert!(matches!(first, Some(StreamEvent::Text(ref t)) if t == "hel"));
 
-        // A usage-only chunk carries no choices; the text keeps flowing after.
         let usage = feed_openai_record(
             &mut state,
             &record(r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}}"#),
@@ -613,8 +558,6 @@ mod tests {
         }
     }
 
-    /// Gemini streams each call complete in one chunk, with a signature and
-    /// no `index`. Two of them are two calls, not one call twice.
     #[test]
     fn keeps_gemini_signatures_and_separates_unindexed_calls() {
         let mut state = OpenAiStreamState::default();
@@ -636,8 +579,6 @@ mod tests {
         }
     }
 
-    /// The signature has to leave the way it arrived, or the next request is a
-    /// 400 naming the call it belongs to.
     #[test]
     fn signed_calls_go_back_signed() {
         let history = vec![Message {
@@ -661,7 +602,6 @@ mod tests {
         let calls = &body["messages"][0]["tool_calls"];
 
         assert_eq!(calls[0]["extra_content"]["google"]["thought_signature"], "sig-one");
-        // An unsigned call stays clean, so plain OpenAI endpoints see no change.
         assert!(calls[1].get("extra_content").is_none());
     }
 
@@ -679,8 +619,6 @@ mod tests {
         }
     }
 
-    /// Reasoning arrives in its own field, under either of its two names, and
-    /// never as answer text.
     #[test]
     fn reasoning_streams_beside_the_answer() {
         let mut state = OpenAiStreamState::default();
@@ -712,22 +650,16 @@ mod tests {
 
     #[test]
     fn a_missing_route_is_told_apart_from_a_bad_request() {
-        // Google's compatibility layer, asked for /responses: a bare 404.
         assert!(lacks_route(&api(404, "")));
         assert!(lacks_route(&api(405, "method not allowed")));
         assert!(lacks_route(&api(501, "")));
         assert!(lacks_route(&api(400, "Unrecognized request URL (POST: /v1/responses)")));
 
-        // The route is there and said something else: no fallback.
         assert!(!lacks_route(&api(400, r#"{"error":{"message":"model field is required"}}"#)));
         assert!(!lacks_route(&api(429, "rate limit exceeded")));
         assert!(!lacks_route(&api(503, "high demand")));
         assert!(!lacks_route(&api(401, "invalid api key")));
     }
-
-    // End to end: a throwaway server plays each endpoint, and every hit on
-    // either route is counted. Each test gets its own port and so its own base
-    // URL, which keeps the remembered answers from leaking between tests.
 
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -740,7 +672,6 @@ mod tests {
     const CHAT_SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"from chat\"}}]}\n\ndata: [DONE]\n\n";
     const RESPONSES_SSE: &str = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"from responses\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}}\n\n";
 
-    /// A scripted answer: status, content type, body.
     type Script = (u16, &'static str, &'static str);
 
     struct Mock {
@@ -816,10 +747,8 @@ mod tests {
 
         assert_eq!(provider.chat(&ask()).await.unwrap().text, "from chat");
         assert_eq!(provider.chat(&ask()).await.unwrap().text, "from chat");
-        // The second turn goes straight to the route that works.
         assert_eq!(mock.hits(), (1, 2));
 
-        // And a stream on the same endpoint knows it too.
         let mock_sse = Mock::start((404, JSON, ""), (200, SSE, CHAT_SSE)).await;
         let (text, done) = collect(mock_sse.provider().chat_stream(&ask()).await.unwrap()).await;
         assert_eq!(text, "from chat");
@@ -827,8 +756,6 @@ mod tests {
         assert_eq!(mock_sse.hits(), (1, 1));
     }
 
-    /// NVIDIA serves `/responses` for some models and 404s it for others, on
-    /// one base URL. What is learned about one model must not leak to another.
     #[tokio::test]
     async fn support_is_learned_per_model_not_per_endpoint() {
         use axum::http::{StatusCode, header};
@@ -854,11 +781,8 @@ mod tests {
 
         let served = ChatRequest::new("served", vec![Message::user("hi")]);
         let unserved = ChatRequest::new("unserved", vec![Message::user("hi")]);
-        // The served model goes first, so the endpoint is proven to have the
-        // route, and still the other model falls back instead of failing.
         assert_eq!(provider.chat(&served).await.unwrap().text, "from responses");
         assert_eq!(provider.chat(&unserved).await.unwrap().text, "from chat");
-        // Nor does the fallback demote the model that is served.
         assert_eq!(provider.chat(&served).await.unwrap().text, "from responses");
     }
 
@@ -884,8 +808,6 @@ mod tests {
         assert_eq!(mock.hits(), (1, 0));
     }
 
-    /// An older LM Studio answers a route it does not have with a 200 and an
-    /// error string, for a stream and a one-shot turn alike.
     #[tokio::test]
     async fn a_200_that_says_no_such_route_still_falls_back() {
         let old = r#"{"error":"Unexpected endpoint or method. (POST /v1/responses)"}"#;
