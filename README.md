@@ -8,7 +8,7 @@ can isolate and organize each source so it stays on the topic of that vault.
 
 <img src="https://luka.onl/f/62742f1581b4.png" width="510">
 
-[📽️ Video demonstration - Calculus prompt](https://luka.onl/f/75d4491e0610.mp4) (data: two >700 page [textbooks](https://openstax.org/subjects/math#Calculus))
+[📽️ Video demonstration - Calculus prompt](https://luka.onl/f/1da1305e4940.mp4) (data: two >700 page [textbooks](https://openstax.org/subjects/math#Calculus))
 
 
 ## Running
