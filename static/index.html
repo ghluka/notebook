@@ -489,15 +489,25 @@
   h2.section { font-size:11px; text-transform:uppercase; color:var(--faint);
                letter-spacing:.09em; margin:24px 0 8px; }
   .settings-wrap { display:flex; min-height:0; flex:1; }
-  #settings .sheet { height:min(720px,100%); }
+  #settings .sheet { height:min(720px,100%); position:relative;
+                     background:#1a1a1a; overflow:hidden; }
   .settings-rail { width:214px; flex:none; border-right:1px solid var(--line);
-                   padding:12px 8px; overflow:auto; }
+                   background:var(--bg); padding:14px 8px; overflow:auto; }
+  .sheet-fade { position:absolute; top:0; right:0; width:130px; height:70px; z-index:2;
+                pointer-events:none;
+                background:linear-gradient(205deg, #1a1a1a 34%, rgba(26,26,26,0) 78%); }
+  .sheet-close { position:absolute; top:12px; right:12px; z-index:3; padding:6px; }
   .settings-search { display:flex; align-items:center; gap:7px; background:var(--bg);
                      border:1px solid var(--line); border-radius:8px; padding:7px 10px;
                      margin:0 4px 8px; color:var(--faint); }
   .settings-search input { flex:1; min-width:0; background:transparent; border:0;
                            outline:none; color:var(--fg); font:inherit; font-size:13px;
-                           padding:0; }
+                           padding:0; -webkit-appearance:none; appearance:none; }
+  .settings-search input::-webkit-search-cancel-button,
+  .settings-search input::-webkit-search-decoration { -webkit-appearance:none; display:none; }
+  input.offscreen { position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+                    overflow:hidden; clip-path:inset(50%); border:0; opacity:0;
+                    pointer-events:none; }
   .settings-group { font-size:11px; color:var(--faint); padding:10px 10px 2px; }
   .settings-tab { display:flex; align-items:center; gap:10px; width:100%;
                   background:transparent; border:0; color:var(--dim); padding:8px 10px;
@@ -506,8 +516,8 @@
   .settings-tab.on { background:var(--raised); color:var(--fg); }
   .settings-tab svg { flex:none; color:var(--faint); }
   .settings-tab.on svg { color:var(--fg); }
-  .settings-body { flex:1; min-width:0; }
-  .settings-body h2.section:first-child { margin-top:14px; }
+  .settings-body { flex:1; min-width:0; padding-top:24px; }
+  .settings-body h2.section:first-child { margin-top:0; }
   .setting input[type=password] { width:250px; flex:none; }
   .pw-form { display:flex; flex-direction:column; gap:8px; padding:11px 0;
              border-bottom:1px solid #232322; }
@@ -749,15 +759,20 @@
 
 <div class="modal" id="settings" hidden>
   <div class="sheet" style="width:min(780px,100%)">
-    <header><b>Settings</b><span class="spacer"></span>
-      <button class="btn ghost" id="closeSettings">Close</button></header>
+    <div class="sheet-fade"></div>
+    <button class="icon-btn sheet-close" id="closeSettings" title="Close">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M3.5 3.5l9 9M12.5 3.5l-9 9"/>
+      </svg>
+    </button>
     <div class="settings-wrap">
       <div class="settings-rail">
         <div class="settings-search">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
             <circle cx="7" cy="7" r="4.2"/><path d="M10.3 10.3L14 14"/>
           </svg>
-          <input type="text" id="settingsSearch" placeholder="Search" autocomplete="off">
+          <input type="search" id="settingsSearch" name="settings-search" placeholder="Search"
+                 autocomplete="off" data-1p-ignore data-lpignore="true" data-form-type="other">
         </div>
         <div class="settings-tabs" id="settingsTabs"></div>
       </div>
@@ -3895,7 +3910,9 @@ async function renderAccount(body) {
       <button class="btn ghost" id="setLogoutAll">Log out all</button>
     </div>
     <h2 class="section">Password</h2>
-    <div class="pw-form">
+    <form class="pw-form" id="pwForm">
+      <input type="text" id="pwUser" name="username" autocomplete="username"
+             value="notebook" tabindex="-1" aria-hidden="true" class="offscreen">
       <div class="row3">
         <input type="password" id="pwCurrent" placeholder="Current password" autocomplete="current-password">
       </div>
@@ -3903,9 +3920,9 @@ async function renderAccount(body) {
         <input type="password" id="pwNew" placeholder="New password, at least 8 characters" autocomplete="new-password">
         <input type="password" id="pwConfirm" placeholder="Repeat new password" autocomplete="new-password">
       </div>
-      <div><button class="btn ghost" id="pwSave">Change password</button></div>
+      <div><button type="submit" class="btn ghost" id="pwSave">Change password</button></div>
       <div class="pw-msg" id="pwMsg"></div>
-    </div>
+    </form>
     <h2 class="section">Active sessions</h2>
     <div id="sessionRows"><div class="hint">Loading...</div></div>`;
   body.querySelector('#setLogout').onclick = async () => {
@@ -3917,7 +3934,8 @@ async function renderAccount(body) {
     await api('/api/auth/logout_all', { method: 'POST' });
     location.href = BASE + '/login';
   };
-  body.querySelector('#pwSave').onclick = async () => {
+  body.querySelector('#pwForm').onsubmit = async e => {
+    e.preventDefault();
     const msg = body.querySelector('#pwMsg');
     const current = body.querySelector('#pwCurrent').value;
     const next = body.querySelector('#pwNew').value;
