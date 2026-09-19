@@ -509,6 +509,24 @@
                     overflow:hidden; clip-path:inset(50%); border:0; opacity:0;
                     pointer-events:none; }
   .settings-group { font-size:11px; color:var(--faint); padding:10px 10px 2px; }
+  .settings-results { position:absolute; top:54px; left:12px; z-index:6;
+                      width:min(430px, calc(100% - 24px)); max-height:min(380px, 60vh);
+                      overflow:auto; background:#1f1f1f; border:1px solid var(--line);
+                      border-radius:10px; padding:6px;
+                      box-shadow:0 18px 44px rgba(0,0,0,.6); }
+  .settings-results[hidden] { display:none; }
+  .settings-results .rgroup { display:flex; align-items:center; gap:9px;
+                              padding:8px 9px 4px; color:var(--fg); font-size:13.5px; }
+  .settings-results .rgroup svg { flex:none; color:var(--faint); }
+  .settings-results button { display:block; width:100%; text-align:left; border:0;
+                             background:transparent; color:var(--dim); font-size:13px;
+                             padding:7px 9px 7px 33px; border-radius:7px; }
+  .settings-results button:hover, .settings-results button.on {
+      background:var(--hover); color:var(--fg); outline:none; }
+  .settings-results .hit { color:var(--accent); font-weight:600; }
+  .settings-results .none { color:var(--faint); font-size:13px; padding:9px; }
+  .setting.flash { animation:flash 1.1s ease-out; border-radius:8px; }
+  @keyframes flash { from { background:rgba(218,119,82,.22); } to { background:transparent; } }
   .settings-tab { display:flex; align-items:center; gap:10px; width:100%;
                   background:transparent; border:0; color:var(--dim); padding:8px 10px;
                   border-radius:8px; font-size:13px; text-align:left; }
@@ -778,6 +796,7 @@
       </div>
       <div class="scroll settings-body" id="settingsBody"></div>
     </div>
+    <div class="settings-results" id="settingsResults" hidden></div>
   </div>
 </div>
 
@@ -3784,6 +3803,68 @@ async function moveFolderToVault(folder) {
   loadVaults();
 }
 
+const PANES = {
+  general: () => `
+    <h2 class="section" style="margin-top:14px">Models</h2>
+    <div class="setting" data-search="model llm">
+      <div><b>Researcher</b><div class="hint">Answers your questions by searching and reading sources.</div></div>
+      <select id="setResearcher"></select>
+    </div>
+    <div class="setting" data-search="model llm vision images">
+      <div><b>Analyzer</b><div class="hint">Reads each upload once. Only models that can see are offered.</div></div>
+      <select id="setAnalyzer"></select>
+    </div>
+    <div class="setting" data-search="model llm rename conversation">
+      <div><b>Namer</b><div class="hint">Titles each new chat from its opening message. Off names it after the message itself.</div></div>
+      <select id="setNamer"></select>
+    </div>
+    <div class="setting" data-search="reasoning budget">
+      <div><b>Thinking effort</b><div class="hint">How long the researcher may reason before it answers.</div></div>
+      <select id="setEffort"></select>
+    </div>
+    <div class="setting" data-search="api key endpoint configure anthropic openai">
+      <div><b>Providers and models</b><div class="hint">Connect endpoints, pin models to the picker, fix capability tags.</div></div>
+      <button class="btn ghost" id="openConfigureBtn">Configure</button>
+    </div>`,
+
+  vault: vault => `
+    <h2 class="section" style="margin-top:14px">Vault</h2>
+    <div class="setting" data-search-label="Manage vaults" data-search="vault rename delete create switch">
+      <div><b>${esc(vault?.name || '')}</b><div class="hint">${vault
+        ? `Open now, ${plural(vault.source_count, 'source')}, ${plural(vault.conversation_count, 'chat')}`
+        : ''}</div></div>
+      <button class="btn ghost" id="setManageVaults">Manage vaults</button>
+    </div>`,
+
+  account: () => `
+    <h2 class="section" style="margin-top:14px">Account</h2>
+    <div class="setting" data-search="log out sign out session">
+      <div><b>Sign out this browser</b><div class="hint">Ends the session on this browser only.</div></div>
+      <button class="btn ghost" id="setLogout">Log out</button>
+    </div>
+    <div class="setting" data-search="log out sign out every session revoke">
+      <div><b>Sign out everywhere</b><div class="hint">Ends every session, including this one.</div></div>
+      <button class="btn ghost" id="setLogoutAll">Log out all</button>
+    </div>
+    <h2 class="section" data-search="change password current new passphrase">Password</h2>
+    <form class="pw-form" id="pwForm">
+      <input type="text" id="pwUser" name="username" autocomplete="username"
+             value="notebook" tabindex="-1" aria-hidden="true" class="offscreen">
+      <div class="row3">
+        <input type="password" id="pwCurrent" placeholder="Current password" autocomplete="current-password">
+      </div>
+      <div class="row3">
+        <input type="password" id="pwNew" placeholder="New password, at least 8 characters" autocomplete="new-password">
+        <input type="password" id="pwConfirm" placeholder="Repeat new password" autocomplete="new-password">
+      </div>
+      <div><button type="submit" class="btn ghost" id="pwSave">Change password</button></div>
+      <div class="pw-msg" id="pwMsg"></div>
+    </form>
+    <h2 class="section" data-search="devices browsers signed in seen">Active sessions</h2>
+    <div id="sessionRows"><div class="hint">Loading...</div></div>`,
+};
+
+
 const SETTINGS_TABS = [
   { id: 'general', label: 'General', group: 'Settings',
     icon: '<path d="M2 5.5h12M2 10.5h12"/><circle cx="10.5" cy="5.5" r="1.7"/><circle cx="5.5" cy="10.5" r="1.7"/>' },
@@ -3792,26 +3873,148 @@ const SETTINGS_TABS = [
   { id: 'vault', label: 'Vault', group: 'Library',
     icon: '<rect x="2.4" y="3" width="11.2" height="10" rx="1"/><path d="M2.4 6h11.2M6.4 8.8h3.2"/>' },
 ];
+
+function indexSettings() {
+  const doc = document.createElement('div');
+  const out = [];
+  for (const tab of SETTINGS_TABS) {
+    const markup = PANES[tab.id];
+    if (!markup) continue;
+    doc.innerHTML = markup();
+    [...doc.querySelectorAll('[data-search]')].forEach((el, ord) => {
+      const label = el.dataset.searchLabel
+        || el.querySelector('b')?.textContent.trim()
+        || el.textContent.trim();
+      if (!label) return;
+      const keywords = [el.dataset.search, el.querySelector('.hint')?.textContent || ''].join(' ');
+      // ord, not the label: a row titled by live data still gets found
+      out.push({ tab, field: { label, keywords, ord } });
+    });
+  }
+  return out;
+}
+
+function settingsMatches(query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return [];
+  if (!state.settingsIndex) state.settingsIndex = indexSettings();
+  return state.settingsIndex.filter(({ tab, field }) =>
+    field.label.toLowerCase().includes(q) ||
+    field.keywords.toLowerCase().includes(q) ||
+    tab.label.toLowerCase().includes(q));
+}
+
+function markHit(text, query) {
+  const q = query.trim();
+  const at = q ? text.toLowerCase().indexOf(q.toLowerCase()) : -1;
+  if (at < 0) return esc(text);
+  return esc(text.slice(0, at)) + '<span class="hit">' +
+         esc(text.slice(at, at + q.length)) + '</span>' + esc(text.slice(at + q.length));
+}
 $('#settingsBtn').onclick = () => openSettings('general');
 $('#closeSettings').onclick = () => { $('#settings').hidden = true; };
 $('#settings').onclick = e => { if (e.target.id === 'settings') e.target.hidden = true; };
-$('#settingsSearch').oninput = e => renderSettingsTabs(e.target.value);
+$('#settingsSearch').oninput = e => renderSettingsResults(e.target.value);
+$('#settingsSearch').onkeydown = onSettingsSearchKey;
+$('#settingsSearch').onblur = () => setTimeout(closeSettingsResults, 120);
+
+function closeSettingsResults() {
+  $('#settingsResults').hidden = true;
+  state.settingsHits = [];
+  state.settingsHit = 0;
+}
+
+function renderSettingsResults(query) {
+  const box = $('#settingsResults');
+  const hits = settingsMatches(query);
+  state.settingsHits = hits;
+  state.settingsHit = 0;
+  box.innerHTML = '';
+
+  if (!query.trim()) return closeSettingsResults();
+  if (!hits.length) {
+    box.innerHTML = '<div class="none">Nothing matches that.</div>';
+    box.hidden = false;
+    return;
+  }
+
+  let lastTab = null;
+  hits.forEach((hit, i) => {
+    if (hit.tab !== lastTab) {
+      lastTab = hit.tab;
+      const head = document.createElement('div');
+      head.className = 'rgroup';
+      head.innerHTML = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none"
+        stroke="currentColor" stroke-width="1.4" stroke-linecap="round">${hit.tab.icon}</svg>
+        <span>${markHit(hit.tab.label, query)}</span>`;
+      box.append(head);
+    }
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = i === 0 ? 'on' : '';
+    b.innerHTML = markHit(hit.field.label, query);
+    b.onmousedown = e => { e.preventDefault(); gotoSetting(i); };
+    box.append(b);
+  });
+  box.hidden = false;
+}
+
+function highlightHit(next) {
+  const rows = [...$('#settingsResults').querySelectorAll('button')];
+  if (!rows.length) return;
+  state.settingsHit = (next + rows.length) % rows.length;
+  rows.forEach((r, i) => r.classList.toggle('on', i === state.settingsHit));
+  rows[state.settingsHit].scrollIntoView({ block: 'nearest' });
+}
+
+function onSettingsSearchKey(e) {
+  const open = !$('#settingsResults').hidden && state.settingsHits?.length;
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    if (open) return closeSettingsResults();
+    $('#settings').hidden = true;
+    return;
+  }
+  if (!open) return;
+  if (e.key === 'ArrowDown') { e.preventDefault(); return highlightHit(state.settingsHit + 1); }
+  if (e.key === 'ArrowUp') { e.preventDefault(); return highlightHit(state.settingsHit - 1); }
+  if (e.key === 'Enter') { e.preventDefault(); return gotoSetting(state.settingsHit); }
+}
+
+async function gotoSetting(index) {
+  const hit = state.settingsHits?.[index];
+  if (!hit) return;
+  closeSettingsResults();
+  $('#settingsSearch').value = '';
+  $('#settingsSearch').blur();
+  if (state.settingsTab !== hit.tab.id) {
+    state.settingsTab = hit.tab.id;
+    renderSettingsTabs();
+    await renderSettings();
+  }
+  const body = $('#settingsBody');
+  const row = body.querySelectorAll('[data-search]')[hit.field.ord];
+  if (!row) return;
+  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  row.classList.remove('flash');
+  void row.offsetWidth;
+  row.classList.add('flash');
+}
 
 async function openSettings(tab) {
   if (tab) state.settingsTab = tab;
   $('#settings').hidden = false;
   $('#settingsSearch').value = '';
-  renderSettingsTabs('');
+  closeSettingsResults();
+  renderSettingsTabs();
   await renderSettings();
 }
 
-function renderSettingsTabs(filter) {
-  const q = (filter || '').trim().toLowerCase();
+function renderSettingsTabs() {
   const box = $('#settingsTabs');
   box.innerHTML = '';
   let lastGroup = null;
   for (const t of SETTINGS_TABS) {
-    if (q && !t.label.toLowerCase().includes(q)) continue;
     if (t.group !== lastGroup) {
       lastGroup = t.group;
       const g = document.createElement('div');
@@ -3824,14 +4027,8 @@ function renderSettingsTabs(filter) {
     b.innerHTML = `<svg width="15" height="15" viewBox="0 0 16 16" fill="none"
       stroke="currentColor" stroke-width="1.4" stroke-linecap="round">${t.icon}</svg>
       <span>${t.label}</span>`;
-    b.onclick = () => { state.settingsTab = t.id; renderSettingsTabs($('#settingsSearch').value); renderSettings(); };
+    b.onclick = () => { state.settingsTab = t.id; renderSettingsTabs(); renderSettings(); };
     box.append(b);
-  }
-  if (!box.children.length) {
-    const g = document.createElement('div');
-    g.className = 'settings-group';
-    g.textContent = 'No matching tabs';
-    box.append(g);
   }
 }
 
@@ -3848,28 +4045,7 @@ async function renderGeneral(body) {
   state.settings = settings;
   const order = [...models].sort((a, b) => Number(b.pinned) - Number(a.pinned));
   const seeing = order.filter(m => m.supports_vision);
-  body.innerHTML = `
-    <h2 class="section" style="margin-top:14px">Models</h2>
-    <div class="setting">
-      <div><b>Researcher</b><div class="hint">Answers your questions by searching and reading sources.</div></div>
-      <select id="setResearcher"></select>
-    </div>
-    <div class="setting">
-      <div><b>Analyzer</b><div class="hint">Reads each upload once. Only models that can see are offered.</div></div>
-      <select id="setAnalyzer"></select>
-    </div>
-    <div class="setting">
-      <div><b>Namer</b><div class="hint">Titles each new chat from its opening message. Off names it after the message itself.</div></div>
-      <select id="setNamer"></select>
-    </div>
-    <div class="setting">
-      <div><b>Thinking effort</b><div class="hint">How long the researcher may reason before it answers.</div></div>
-      <select id="setEffort"></select>
-    </div>
-    <div class="setting">
-      <div><b>Providers and models</b><div class="hint">Connect endpoints, pin models to the picker, fix capability tags.</div></div>
-      <button class="btn ghost" id="openConfigureBtn">Configure</button>
-    </div>`;
+  body.innerHTML = PANES.general();
   fillModelSelect(body.querySelector('#setResearcher'), order, settings.researcher);
   fillModelSelect(body.querySelector('#setAnalyzer'), seeing.length ? seeing : order, settings.analyzer);
   fillModelSelect(body.querySelector('#setNamer'), order, settings.namer, { off: 'Off, use the message' });
@@ -3887,44 +4063,12 @@ async function renderGeneral(body) {
 
 async function renderSettingsVault(body) {
   const vault = state.vaults.find(v => v.id === state.vault?.id);
-  body.innerHTML = `
-    <h2 class="section" style="margin-top:14px">Vault</h2>
-    <div class="setting">
-      <div><b>${esc(vault?.name || '')}</b><div class="hint">${vault
-        ? `Open now, ${plural(vault.source_count, 'source')}, ${plural(vault.conversation_count, 'chat')}`
-        : ''}</div></div>
-      <button class="btn ghost" id="setManageVaults">Manage vaults</button>
-    </div>`;
+  body.innerHTML = PANES.vault(vault);
   body.querySelector('#setManageVaults').onclick = () => { $('#settings').hidden = true; openVaultManager(); };
 }
 
 async function renderAccount(body) {
-  body.innerHTML = `
-    <h2 class="section" style="margin-top:14px">Account</h2>
-    <div class="setting">
-      <div><b>Sign out this browser</b><div class="hint">Ends the session on this browser only.</div></div>
-      <button class="btn ghost" id="setLogout">Log out</button>
-    </div>
-    <div class="setting">
-      <div><b>Sign out everywhere</b><div class="hint">Ends every session, including this one.</div></div>
-      <button class="btn ghost" id="setLogoutAll">Log out all</button>
-    </div>
-    <h2 class="section">Password</h2>
-    <form class="pw-form" id="pwForm">
-      <input type="text" id="pwUser" name="username" autocomplete="username"
-             value="notebook" tabindex="-1" aria-hidden="true" class="offscreen">
-      <div class="row3">
-        <input type="password" id="pwCurrent" placeholder="Current password" autocomplete="current-password">
-      </div>
-      <div class="row3">
-        <input type="password" id="pwNew" placeholder="New password, at least 8 characters" autocomplete="new-password">
-        <input type="password" id="pwConfirm" placeholder="Repeat new password" autocomplete="new-password">
-      </div>
-      <div><button type="submit" class="btn ghost" id="pwSave">Change password</button></div>
-      <div class="pw-msg" id="pwMsg"></div>
-    </form>
-    <h2 class="section">Active sessions</h2>
-    <div id="sessionRows"><div class="hint">Loading...</div></div>`;
+  body.innerHTML = PANES.account();
   body.querySelector('#setLogout').onclick = async () => {
     await api('/api/auth/logout', { method: 'POST' });
     location.href = BASE + '/login';
