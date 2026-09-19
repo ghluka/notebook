@@ -353,6 +353,9 @@ pub fn client_ip(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> Str
 }
 
 fn is_public(method: &str, path: &str) -> bool {
+    if method == "GET" && is_font(path) {
+        return true;
+    }
     matches!(
         (method, path),
         ("GET", "/login")
@@ -361,6 +364,11 @@ fn is_public(method: &str, path: &str) -> bool {
             | ("POST", "/api/auth/login")
             | ("POST", "/api/auth/setup")
     )
+}
+
+fn is_font(path: &str) -> bool {
+    let Some(name) = path.strip_prefix("/fonts/") else { return false };
+    !name.contains('/') && !name.contains("..") && name.ends_with(".woff2")
 }
 
 // outside the router, so an unknown path still 401s instead of 404

@@ -929,6 +929,7 @@ pub struct Conversation {
     pub title: String,
     pub summary: Option<String>,
     pub summarized_at: Option<String>,
+    pub summary_tokens: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1025,6 +1026,7 @@ pub async fn compact_conversation(
     owner: &str,
     id: &str,
     summary: &str,
+    summary_tokens: i64,
 ) -> sqlx::Result<i64> {
     let mut tx = db.begin().await?;
     let marked = sqlx::query(
@@ -1040,13 +1042,15 @@ pub async fn compact_conversation(
     .rows_affected() as i64;
 
     sqlx::query(
-        "UPDATE conversations SET summary = ?3, summarized_at = ?4, updated_at = ?4
+        "UPDATE conversations
+            SET summary = ?3, summarized_at = ?4, updated_at = ?4, summary_tokens = ?5
           WHERE id = ?1 AND owner_id = ?2",
     )
     .bind(id)
     .bind(owner)
     .bind(summary)
     .bind(now())
+    .bind(summary_tokens)
     .execute(&mut *tx)
     .await?;
 

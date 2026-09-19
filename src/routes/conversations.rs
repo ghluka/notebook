@@ -30,12 +30,15 @@ pub async fn get(
     let conversation = load(&state, &id).await?;
     let messages = db::conversation_messages(&state.db, &conversation.id).await?;
 
-    // context meter reads the last assistant turn's usage
+    // Context meter reads the last assistant turn's usage, but only from turns still
+    // in context: a compacted turn's figure describes a transcript the model no longer
+    // sees. Once everything is folded away, what remains in context is the summary.
     let last_usage = messages
         .iter()
         .rev()
-        .find(|m| m.role == "assistant" && m.input_tokens.is_some())
-        .map(|m| m.input_tokens.unwrap_or(0) + m.output_tokens.unwrap_or(0));
+        .find(|m| m.role == "assistant" && !m.compacted && m.input_tokens.is_some())
+        .map(|m| m.input_tokens.unwrap_or(0) + m.output_tokens.unwrap_or(0))
+        .or(conversation.summary_tokens);
 
     Ok(Json(json!({
         "conversation": conversation,
@@ -153,7 +156,9 @@ pub async fn compact(
         ));
     }
 
-    let compacted = db::compact_conversation(&state.db, &state.user_id, &id, &summary).await?;
+    let summary_tokens = response.usage.output_tokens as i64;
+    let compacted =
+        db::compact_conversation(&state.db, &state.user_id, &id, &summary, summary_tokens).await?;
 
     Ok(Json(json!({
         "conversation_id": id,
