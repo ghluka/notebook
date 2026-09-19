@@ -15,7 +15,7 @@ use crate::state::AppState;
 
 const MAX_TOOL_ROUNDS: usize = 6;
 const TITLE_MAX_CHARS: usize = 60;
-const TITLE_MAX_TOKENS: u32 = 24;
+const TITLE_MAX_TOKENS: u32 = 1024;
 
 // the namer never answers the question, it only labels the thread
 const NAMER_SYSTEM: &str = "\
@@ -927,7 +927,7 @@ async fn generate_title(state: &AppState, message: &str, tx: Option<&TokenSink>)
                     Ok(_) => {}
                     Err(_) => return None,
                 }
-                if title.chars().count() > TITLE_MAX_CHARS * 2 {
+                if title.contains('\n') || title.chars().count() > TITLE_MAX_CHARS * 2 {
                     break;
                 }
             }
@@ -937,14 +937,47 @@ async fn generate_title(state: &AppState, message: &str, tx: Option<&TokenSink>)
     tidy_title(&title)
 }
 
+struct OpenTurn {
+    conversation_id: String,
+    user_message_id: String,
+}
+
+async fn begin_turn(state: &AppState, prep: &PreparedTurn, message: &str) -> AppResult<OpenTurn> {
+    let conversation_id = match &prep.existing {
+        Some(c) => c.id.clone(),
+        None => {
+            let title = title_from_message(message);
+            db::create_conversation(&state.db, &state.user_id, &prep.vault, &title).await?.id
+        }
+    };
+
+    let user_message_id =
+        db::append_message(&state.db, &conversation_id, "user", message, None, None, None).await?;
+    if !prep.attached.is_empty() {
+        let mut files = Vec::new();
+        for id in &prep.attached {
+            if let Some(s) = db::get_source(&state.db, id).await? {
+                files.push(json!({ "id": s.id, "title": s.title, "kind": s.kind }));
+            }
+        }
+        db::set_message_attachments(&state.db, &user_message_id, &json!(files).to_string())
+            .await?;
+    }
+    Ok(OpenTurn { conversation_id, user_message_id })
+}
+
+async fn apply_title(state: &AppState, conversation_id: &str, title: Option<String>) {
+    let Some(title) = title else { return };
+    let _ = db::rename_conversation(&state.db, &state.user_id, conversation_id, &title).await;
+}
+
 async fn finish_turn(
     state: &AppState,
     prep: &PreparedTurn,
-    message: &str,
+    open: &OpenTurn,
     text: &str,
     usage: TurnUsage,
     trace: TurnTrace,
-    title: Option<String>,
 ) -> AppResult<ChatResponseBody> {
     let (input_tokens, output_tokens) = (usage.input_tokens, usage.output_tokens);
     let mut citations: Vec<Citation> = cited_hits(&plain_marks(text), &prep.seen)
@@ -984,29 +1017,10 @@ async fn finish_turn(
             .collect();
     }
 
-    let conversation_id = match &prep.existing {
-        Some(c) => c.id.clone(),
-        None => {
-            let title = title.unwrap_or_else(|| title_from_message(message));
-            db::create_conversation(&state.db, &state.user_id, &prep.vault, &title).await?.id
-        }
-    };
-
-    let user_message_id =
-        db::append_message(&state.db, &conversation_id, "user", message, None, None, None).await?;
-    if !prep.attached.is_empty() {
-        let mut files = Vec::new();
-        for id in &prep.attached {
-            if let Some(s) = db::get_source(&state.db, id).await? {
-                files.push(json!({ "id": s.id, "title": s.title, "kind": s.kind }));
-            }
-        }
-        db::set_message_attachments(&state.db, &user_message_id, &json!(files).to_string())
-            .await?;
-    }
+    let OpenTurn { conversation_id, user_message_id } = open;
     let message_id = db::append_message(
         &state.db,
-        &conversation_id,
+        conversation_id,
         "assistant",
         text,
         Some(&json!(&citations).to_string()),
@@ -1023,9 +1037,9 @@ async fn finish_turn(
     }
 
     Ok(ChatResponseBody {
-        conversation_id,
+        conversation_id: conversation_id.clone(),
         message_id,
-        user_message_id,
+        user_message_id: user_message_id.clone(),
         answer: text.to_string(),
         citations,
         model: prep.resolved.model.model_id.clone(),
@@ -1051,6 +1065,7 @@ pub async fn chat(
     }
 
     let (mut prep, client) = prepare_turn(&state, &body).await?;
+    let open = begin_turn(&state, &prep, &body.message).await?;
 
     let mut input_tokens = 0;
     let mut output_tokens = 0;
@@ -1123,20 +1138,19 @@ pub async fn chat(
         round += 1;
     };
 
-    let title = match prep.existing {
-        Some(_) => None,
-        None => generate_title(&state, &body.message, None).await,
-    };
+    if prep.existing.is_none() {
+        let title = generate_title(&state, &body.message, None).await;
+        apply_title(&state, &open.conversation_id, title).await;
+    }
 
     Ok(Json(
         finish_turn(
             &state,
             &prep,
-            &body.message,
+            &open,
             &outcome.text,
             TurnUsage { input_tokens, output_tokens },
             TurnTrace { read_sources, tool_log, thinking, thinking_ms, steps },
-            title,
         )
         .await?,
     ))
@@ -1172,14 +1186,33 @@ async fn run_stream_turn(
     let mut round = 0;
     let mut answered_now = false;
 
-    // a new thread names itself alongside the answer, so the title streams in early
-    let naming = match prep.existing {
-        Some(_) => None,
-        None => {
+    let fresh = prep.existing.is_none();
+    let open = match begin_turn(&state, &prep, &body.message).await {
+        Ok(o) => o,
+        Err(e) => {
+            send_error(&tx, &e);
+            return;
+        }
+    };
+    let will_name =
+        fresh && models::resolve_namer(&state.db, &state.user_id).await.ok().flatten().is_some();
+
+    emit_json(
+        &tx,
+        "chat",
+        json!({ "conversation_id": open.conversation_id, "fresh": fresh, "naming": will_name }),
+    );
+
+    let naming = match will_name {
+        false => None,
+        true => {
             let (state, message, tx) = (state.clone(), body.message.clone(), tx.clone());
-            Some(tokio::spawn(
-                async move { generate_title(&state, &message, Some(&tx)).await },
-            ))
+            let id = open.conversation_id.clone();
+            Some(tokio::spawn(async move {
+                let title = generate_title(&state, &message, Some(&tx)).await;
+                apply_title(&state, &id, title.clone()).await;
+                title
+            }))
         }
     };
 
@@ -1226,23 +1259,22 @@ async fn run_stream_turn(
             if tx.is_closed() {
                 return;
             }
-            let title = match naming {
-                Some(handle) => handle.await.ok().flatten(),
-                None => None,
-            };
             match finish_turn(
                 &state,
                 &prep,
-                &body.message,
+                &open,
                 &outcome.text,
                 TurnUsage { input_tokens, output_tokens },
                 TurnTrace { read_sources, tool_log, thinking, thinking_ms, steps },
-                title,
             )
             .await
             {
                 Ok(res) => emit_json(&tx, "done", json!(res)),
                 Err(e) => send_error(&tx, &e),
+            }
+            if let Some(handle) = naming {
+                let named = handle.await.ok().flatten();
+                emit_json(&tx, "named", json!({ "title": named }));
             }
             return;
         }

@@ -60,8 +60,6 @@
   .chat-row:hover { background:var(--hover); }
   .chat-row.on { background:#3b3a37; color:var(--fg); }
   .chat-row .ct { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .chat-row.naming .ct::after { content:'▍'; color:var(--accent);
-                                animation:blink 1s steps(1) infinite; }
   .chat-row .when { font-size:11px; color:var(--faint); flex:none; }
   .chat-row .dot { color:var(--accent); font-size:10px; }
   .chat-row .kill { display:none; background:transparent; border:0; color:var(--faint);
@@ -3024,6 +3022,7 @@ async function runTurn(text, files = []) {
     let buf = '';
     let finished = false;
     let naming = '';
+    let awaitingName = false;
     for (;;) {
       const { done, value } = await reader.read();
       if (value) buf += decoder.decode(value, { stream: true });
@@ -3045,7 +3044,14 @@ async function runTurn(text, files = []) {
         } catch {
           continue;
         }
-        if (event === 'title') {
+        if (event === 'chat') {
+          state.conversationId = msg.conversation_id;
+          localStorage.setItem(lastChatKey(), msg.conversation_id);
+          setUrl(msg.conversation_id, { replace: true });
+          awaitingName = !!msg.naming;
+          if (msg.fresh) showNaming(text.slice(0, 60));
+          else syncDocTitle();
+        } else if (event === 'title') {
           naming += msg.t || '';
           showNaming(naming);
         } else if (event === 'token') {
@@ -3077,18 +3083,24 @@ async function runTurn(text, files = []) {
             setDetail(toolStep, msg.found || '');
             toolStep = null;
           }
+        } else if (event === 'named') {
+          awaitingName = false;
+          if (msg.title) showNaming(msg.title);
+          $('#namingRow')?.remove();
+          loadChats();
         } else if (event === 'done') {
           finished = true;
           state.conversationId = msg.conversation_id;
-          localStorage.setItem(LAST_CHAT_KEY, msg.conversation_id);
+          localStorage.setItem(lastChatKey(), msg.conversation_id);
           setUrl(msg.conversation_id, { replace: true });
+          if (!awaitingName) $('#namingRow')?.remove();
           state.context = { used: msg.context_used, window: msg.context_window };
           renderContext();
           turn.classList.remove('live');
           attachUserActions(asked, { message_id: msg.user_message_id, text, files });
           closeThought();
           finishTurn(turn, msg);
-          loadChats();
+          if (!awaitingName) loadChats();
         } else if (event === 'error') {
           const e = new Error(msg.error || 'stream failed');
           e.payload = msg;
@@ -3218,7 +3230,7 @@ function showNaming(text) {
     list.querySelector('.chat-empty')?.remove();
     row = document.createElement('div');
     row.id = 'namingRow';
-    row.className = 'chat-row on naming';
+    row.className = 'chat-row on';
     row.innerHTML = '<span class="ct"></span><span class="when"></span>';
     list.prepend(row);
   }
@@ -3227,8 +3239,11 @@ function showNaming(text) {
 }
 
 function clearNaming() {
+  const had = !!$('#namingRow');
   $('#namingRow')?.remove();
-  syncDocTitle();
+  if (!had) return syncDocTitle();
+  loadChats();
+  setTimeout(loadChats, 1500);
 }
 
 function ago(iso) {

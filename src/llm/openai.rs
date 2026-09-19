@@ -197,7 +197,7 @@ impl OpenAiProvider {
         // most servers omit usage from streamed chunks without this
         body["stream_options"] = json!({ "include_usage": true });
         let resp = self.post("/chat/completions", &body).await?;
-        Ok(pump(resp, OpenAiStreamState::default(), feed_chat, "the stream ended before [DONE]"))
+        Ok(pump(resp, OpenAiStreamState::default(), feed_chat, close_chat))
     }
 
     async fn responses_stream(&self, req: &ChatRequest) -> Result<TokenStream, LlmError> {
@@ -218,12 +218,7 @@ impl OpenAiProvider {
             }));
         }
 
-        Ok(pump(
-            resp,
-            responses::StreamState::default(),
-            responses::feed,
-            "the stream ended before the response completed",
-        ))
+        Ok(pump(resp, responses::StreamState::default(), responses::feed, close_responses))
     }
 }
 
@@ -345,13 +340,14 @@ fn parse_chat_completion(v: &Value, requested_model: &str) -> ChatResponse {
 
 type Sender = futures::channel::mpsc::UnboundedSender<Result<StreamEvent, LlmError>>;
 type Feed<S> = fn(&mut S, &SseRecord) -> Result<Vec<StreamEvent>, LlmError>;
+type Close<S> = fn(&mut S) -> Result<StreamEvent, LlmError>;
 
 // handshake is done, so errors here end the turn; a dropped stream kills the provider call
 fn pump<S: Send + 'static>(
     resp: reqwest::Response,
     mut state: S,
     feed: Feed<S>,
-    unfinished: &'static str,
+    close: Close<S>,
 ) -> TokenStream {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     tokio::spawn(async move {
@@ -372,14 +368,15 @@ fn pump<S: Send + 'static>(
                 }
             }
         }
-        // flush trailing bytes; a well formed stream closes itself, ending without that means data was lost
+        // flush trailing bytes; a well formed stream closes itself, so ask the state
+        // whether what it saw amounts to a finished answer or to lost data
         buf.push_str("\n\n");
         for rec in split_sse_records(&mut buf) {
             if forward(&tx, &mut state, feed, &rec) {
                 return;
             }
         }
-        let _ = tx.unbounded_send(Err(LlmError::Request(unfinished.into())));
+        let _ = tx.unbounded_send(close(&mut state));
     });
     Box::pin(rx)
 }
@@ -407,6 +404,35 @@ fn feed_chat(state: &mut OpenAiStreamState, rec: &SseRecord) -> Result<Vec<Strea
     feed_openai_record(state, rec).map(|ev| ev.into_iter().collect())
 }
 
+fn done_of(state: &OpenAiStreamState) -> StreamEvent {
+    let tool_calls = state
+        .tools
+        .values()
+        .map(|b| ToolCall {
+            id: b.id.clone(),
+            name: b.name.clone(),
+            arguments: serde_json::from_str(&b.arguments).unwrap_or(Value::Null),
+            signature: b.signature.clone(),
+        })
+        .collect();
+    StreamEvent::Done(StreamDone {
+        tool_calls,
+        input_tokens: state.input_tokens,
+        output_tokens: state.output_tokens,
+    })
+}
+
+fn close_chat(state: &mut OpenAiStreamState) -> Result<StreamEvent, LlmError> {
+    if state.finished {
+        return Ok(done_of(state));
+    }
+    Err(LlmError::Request("the stream ended before the answer finished".into()))
+}
+
+fn close_responses(_: &mut responses::StreamState) -> Result<StreamEvent, LlmError> {
+    Err(LlmError::Request("the stream ended before the response completed".into()))
+}
+
 #[derive(Debug, Default)]
 struct OpenAiStreamState {
     tools: std::collections::BTreeMap<u64, OpenAiToolBuilder>,
@@ -414,6 +440,7 @@ struct OpenAiStreamState {
     next_slot: u64,
     input_tokens: u32,
     output_tokens: u32,
+    finished: bool,
 }
 
 #[derive(Debug, Default)]
@@ -453,27 +480,16 @@ fn feed_openai_record(
     rec: &SseRecord,
 ) -> Result<Option<StreamEvent>, LlmError> {
     if rec.data.trim() == "[DONE]" {
-        let tool_calls = state
-            .tools
-            .values()
-            .map(|b| ToolCall {
-                id: b.id.clone(),
-                name: b.name.clone(),
-                arguments: serde_json::from_str(&b.arguments).unwrap_or(Value::Null),
-                signature: b.signature.clone(),
-            })
-            .collect();
-        return Ok(Some(StreamEvent::Done(StreamDone {
-            tool_calls,
-            input_tokens: state.input_tokens,
-            output_tokens: state.output_tokens,
-        })));
+        return Ok(Some(done_of(state)));
     }
 
     let v: Value = serde_json::from_str(&rec.data)?;
     if let Some(u) = v.get("usage") {
         state.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0) as u32;
         state.output_tokens = u["completion_tokens"].as_u64().unwrap_or(0) as u32;
+    }
+    if v["choices"][0]["finish_reason"].as_str().is_some() {
+        state.finished = true;
     }
     let delta = &v["choices"][0]["delta"];
     for tc in delta["tool_calls"].as_array().cloned().unwrap_or_default() {
@@ -509,6 +525,48 @@ mod tests {
 
     fn record(data: &str) -> SseRecord {
         SseRecord { event: None, data: data.into() }
+    }
+
+    #[test]
+    fn a_finish_reason_closes_a_stream_that_never_says_done() {
+        let mut state = OpenAiStreamState::default();
+        for line in [
+            r#"{"choices":[{"delta":{"content":"hi"},"index":0}]}"#,
+            r#"{"choices":[{"delta":{},"index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#,
+        ] {
+            feed_openai_record(&mut state, &record(line)).expect("record");
+        }
+        let StreamEvent::Done(done) = close_chat(&mut state).expect("a finished answer") else {
+            panic!("expected the stream to close as done");
+        };
+        assert_eq!(done.input_tokens, 3);
+        assert_eq!(done.output_tokens, 1);
+    }
+
+    #[test]
+    fn a_stream_cut_off_mid_answer_is_still_an_error() {
+        let mut state = OpenAiStreamState::default();
+        feed_openai_record(&mut state, &record(r#"{"choices":[{"delta":{"content":"half"}}]}"#))
+            .expect("record");
+        assert!(close_chat(&mut state).is_err(), "no finish_reason means data was lost");
+    }
+
+    #[test]
+    fn tool_calls_survive_a_stream_that_never_says_done() {
+        let mut state = OpenAiStreamState::default();
+        for line in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"search","arguments":"{\"q\""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"x\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            feed_openai_record(&mut state, &record(line)).expect("record");
+        }
+        let StreamEvent::Done(done) = close_chat(&mut state).expect("a finished answer") else {
+            panic!("expected the stream to close as done");
+        };
+        assert_eq!(done.tool_calls.len(), 1);
+        assert_eq!(done.tool_calls[0].name, "search");
+        assert_eq!(done.tool_calls[0].arguments, json!({ "q": "x" }));
     }
 
     #[test]
