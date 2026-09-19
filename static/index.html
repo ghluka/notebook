@@ -38,6 +38,8 @@
 
   aside { background:var(--panel); border-right:1px solid var(--line);
           display:flex; flex-direction:column; min-width:0; }
+  .brand { flex:none; font:22px/1 var(--serif); color:var(--fg); letter-spacing:.01em;
+           padding:16px 14px 13px; text-decoration:none; display:block; }
 
   .icon-btn { background:transparent; border:0; padding:4px; border-radius:6px;
               color:var(--dim); display:flex; }
@@ -58,6 +60,8 @@
   .chat-row:hover { background:var(--hover); }
   .chat-row.on { background:#3b3a37; color:var(--fg); }
   .chat-row .ct { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .chat-row.naming .ct::after { content:'▍'; color:var(--accent);
+                                animation:blink 1s steps(1) infinite; }
   .chat-row .when { font-size:11px; color:var(--faint); flex:none; }
   .chat-row .dot { color:var(--accent); font-size:10px; }
   .chat-row .kill { display:none; background:transparent; border:0; color:var(--faint);
@@ -335,16 +339,31 @@
   }
 
   .ctx { position:fixed; z-index:80; background:#2c2b29; border:1px solid var(--line);
-         border-radius:10px; padding:5px; min-width:190px;
-         box-shadow:0 16px 40px rgba(0,0,0,.55); }
+         border-radius:10px; padding:5px; min-width:208px;
+         box-shadow:0 16px 40px rgba(0,0,0,.55);
+         animation:pop-in .11s ease-out; }
   .ctx[hidden], .pop[hidden], .menu[hidden] { display:none; }
-  .ctx button, .row { display:flex; align-items:center; justify-content:space-between;
+  .row { display:flex; align-items:center; justify-content:space-between;
          gap:14px; width:100%; background:transparent; border:0; color:var(--fg);
          padding:7px 10px; border-radius:7px; text-align:left; font-size:13px; }
-  .ctx button:hover, button.row:hover { background:var(--hover); }
+  button.row:hover { background:var(--hover); }
+  /* menu rows: icon, label, then the shortcut flush right */
+  .ctx button { display:flex; align-items:center; gap:10px; width:100%;
+         background:transparent; border:0; color:var(--fg);
+         padding:6px 9px; border-radius:7px; text-align:left; font-size:13px; }
+  .ctx button .ico { display:flex; flex:none; color:var(--faint); }
+  .ctx button .lbl { flex:1; min-width:0; overflow:hidden;
+         text-overflow:ellipsis; white-space:nowrap; }
+  .ctx button:hover, .ctx button:focus { background:var(--hover); outline:none; }
+  .ctx button:hover .ico, .ctx button:focus .ico { color:var(--dim); }
   .ctx button.danger { color:var(--bad); }
-  .ctx .key { color:var(--faint); font-size:12px; }
+  .ctx button.danger .ico { color:var(--bad); opacity:.7; }
+  .ctx button.danger:hover, .ctx button.danger:focus { background:rgba(224,122,106,.13); }
+  .ctx button.danger:hover .ico, .ctx button.danger:focus .ico { opacity:1; }
+  .ctx .key { flex:none; color:var(--faint); font-size:11px; letter-spacing:.02em;
+         min-width:12px; text-align:right; }
   .sep { height:1px; background:var(--line); margin:5px 3px; }
+  @keyframes pop-in { from { opacity:0; transform:translateY(-4px) scale(.98); } }
 
   .pop { position:absolute; bottom:76px; right:24px; z-index:20; background:#2c2b29;
          border:1px solid var(--line); border-radius:12px; min-width:290px;
@@ -358,15 +377,20 @@
   .barmeter i { display:block; height:100%; background:var(--accent); }
 
   #dialog { z-index:90; }
-  .dialog { width:min(420px, 100%); }
-  .dialog .head { padding:14px 16px 0; font-weight:600; font-size:14px; }
-  .dialog .msg { padding:8px 16px 0; color:var(--dim); font-size:13px;
+  /* .sheet sets a width further down, so this has to outrank it */
+  .sheet.dialog { width:min(430px, 100%); flex:0 0 auto; border-radius:16px;
+            box-shadow:0 24px 64px rgba(0,0,0,.55);
+            animation:dialog-in .14s cubic-bezier(.2,.7,.3,1); }
+  .dialog .head { padding:18px 20px 0; font-weight:600; font-size:15px;
+                  letter-spacing:-.01em; }
+  .dialog .msg { padding:7px 20px 0; color:var(--dim); font-size:13px;
                  line-height:1.5; white-space:pre-wrap; }
-  .dialog .field { padding:14px 16px 0; margin:0; }
+  .dialog .field { padding:14px 20px 0; margin:0; }
+  @keyframes dialog-in { from { opacity:0; transform:translateY(8px) scale(.97); } }
   .dialog .field input, .dialog .field select { width:100%; }
   .dialog .actions { display:flex; justify-content:flex-end; gap:8px;
-                     padding:16px; }
-  .dialog .form { padding:12px 16px 0; display:flex; flex-direction:column; gap:11px; }
+                     padding:18px 20px 20px; }
+  .dialog .form { padding:12px 20px 0; display:flex; flex-direction:column; gap:11px; }
   .dialog .form label { display:flex; flex-direction:column; gap:4px;
                         font-size:12px; color:var(--faint); }
   .dialog .form label input[type=text], .dialog .form label input[type=number],
@@ -376,11 +400,25 @@
   .dialog .checks { display:flex; flex-wrap:wrap; gap:14px; }
   .dialog .checks label { flex-direction:row; align-items:center; gap:6px;
                           font-size:13px; color:var(--fg); }
-  .dialog .actions .btn.danger { border-color:#5c3a35; }
-  .dialog .actions .btn.danger:hover { background:#3a2724; }
+  /* the confirm button carries the focus ring: Enter fires it, Tab moves to Cancel */
+  .dialog .actions .btn { padding:9px 16px; }
+  .dialog .actions .btn.danger { background:#a8453a; color:#fdf2f0;
+                                 border-color:transparent; font-weight:600; }
+  .dialog .actions .btn.danger:hover { background:#b8503f; }
+  .dialog .actions .btn:focus-visible, .dialog .actions .btn.lit {
+      outline:none; box-shadow:0 0 0 2px var(--panel), 0 0 0 4px var(--accent); }
+  .dialog .actions .btn.danger:focus-visible, .dialog .actions .btn.danger.lit {
+      box-shadow:0 0 0 2px var(--panel), 0 0 0 4px #e07a6a; }
+  .dialog .actions .btn.ghost:focus-visible, .dialog .actions .btn.ghost.lit {
+      box-shadow:0 0 0 2px var(--panel), 0 0 0 4px #6f6c66; }
 
   .modal { position:fixed; inset:0; background:rgba(0,0,0,.62); z-index:60;
-           display:flex; align-items:center; justify-content:center; padding:34px; }
+           display:flex; align-items:center; justify-content:center; padding:34px;
+           animation:fade-in .12s ease-out; }
+  @keyframes fade-in { from { opacity:0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .modal, .sheet.dialog, .ctx { animation:none; }
+  }
   .modal[hidden] { display:none; }
   .sheet { background:var(--panel); border:1px solid var(--line); border-radius:14px;
            width:min(1120px,100%); max-height:100%; display:flex; flex-direction:column; }
@@ -463,6 +501,7 @@
 <body>
 
 <aside>
+  <a class="brand" id="brand">Notebook</a>
   <div class="rail-section">
     <div class="section-head">
       <b>Chats</b>
@@ -1217,11 +1256,6 @@ function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cance
       done(value === '' ? null : value);
     };
 
-    const onKey = e => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done(null); }
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.stopPropagation(); submit(); }
-    };
-
     let cancel = null;
     if (cancelLabel) {
       cancel = document.createElement('button');
@@ -1236,11 +1270,42 @@ function dialog({ title, message = '', confirmLabel = 'OK', cancelLabel = 'Cance
     ok.onclick = submit;
     actions.append(ok);
 
+    // Tab cycles inside the dialog, so it can never reach the page behind it
+    const tabStops = () => [control, cancel, ok].filter(Boolean);
+
+    const onKey = e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); return done(null); }
+      if (e.key === 'Tab') {
+        const stops = tabStops();
+        if (stops.length < 2) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const at = stops.indexOf(document.activeElement);
+        const next = at < 0 ? 0 : (at + (e.shiftKey ? -1 : 1) + stops.length) % stops.length;
+        stops[next].focus();
+        if (stops[next] === control && control.select) control.select();
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        // Enter fires whichever button holds focus, so Tab+Enter really cancels
+        const held = document.activeElement;
+        if (actions.contains(held) && held.tagName === 'BUTTON') return held.click();
+        submit();
+      }
+    };
+
     modal.hidden = false;
     modal.onclick = e => { if (e.target === modal) done(null); };
     document.addEventListener('keydown', onKey, true);
-    // never focus a destructive button: space should cancel, not delete
-    (control || (danger && cancel) || ok).focus();
+    // the confirm button takes focus so Enter commits; Tab steps to Cancel
+    const first = control || ok;
+    first.focus();
+    if (!control) ok.classList.add('lit');
+    for (const b of [cancel, ok]) {
+      if (b) b.addEventListener('blur', () => b.classList.remove('lit'));
+    }
     if (control && control.select) control.select();
   });
 }
@@ -1261,75 +1326,146 @@ const askChoice = (title, message, choices, confirmLabel = 'OK') =>
 const askFields = (title, message, fields, confirmLabel = 'Save') =>
   dialog({ title, message, fields, confirmLabel });
 
+/* 16x16 line icons for the context menus, drawn in the same weight as the chrome */
+const MENU_ICONS = {
+  open:     'M9.4 2.6h4v4M13.4 2.6 7.9 8.1M11.4 9.3v3.2a.9.9 0 0 1-.9.9H3.4a.9.9 0 0 1-.9-.9V5.4a.9.9 0 0 1 .9-.9h3.2',
+  chat:     'M13.6 9.1a1.4 1.4 0 0 1-1.4 1.4H5.4L2.6 13.3V3.9a1.4 1.4 0 0 1 1.4-1.4h8.2a1.4 1.4 0 0 1 1.4 1.4z',
+  attach:   'M12.6 7.4 7.5 12.5a3 3 0 0 1-4.2-4.2l5.6-5.6a2 2 0 0 1 2.8 2.8l-5.6 5.6a1 1 0 0 1-1.4-1.4l5.1-5.1',
+  rename:   'M11.1 2.7l2.2 2.2M12 1.8a1.3 1.3 0 0 1 1.8 1.8l-8.2 8.2-2.8.7.7-2.8z',
+  folder:   'M1.8 12.6V3.9a.8.8 0 0 1 .8-.8h3.1l1.4 1.7h6.1a.8.8 0 0 1 .8.8v7a.8.8 0 0 1-.8.8H2.6a.8.8 0 0 1-.8-.8z',
+  folderAdd:'M1.8 12.6V3.9a.8.8 0 0 1 .8-.8h3.1l1.4 1.7h6.1a.8.8 0 0 1 .8.8v7a.8.8 0 0 1-.8.8H2.6a.8.8 0 0 1-.8-.8zM8 7.4v3.4M6.3 9.1h3.4',
+  root:     'M2.6 7.5 8 3l5.4 4.5M4.3 6.9v5.4a.7.7 0 0 0 .7.7h6a.7.7 0 0 0 .7-.7V6.9',
+  vault:    'M2.2 4.3h11.6M3 4.3v8.1a.8.8 0 0 0 .8.8h8.4a.8.8 0 0 0 .8-.8V4.3M2.2 4.3 3.3 2.4h9.4l1.1 1.9M6.4 7.3h3.2',
+  rerun:    'M13.4 8a5.4 5.4 0 1 1-1.6-3.8M13.6 2.4v3.4h-3.4',
+  upload:   'M8 10.4V2.6M5.2 5.4 8 2.6l2.8 2.8M2.6 10.3v2.1a.9.9 0 0 0 .9.9h9a.9.9 0 0 0 .9-.9v-2.1',
+  compact:  'M2.6 8h10.8M6.4 3.5 8 5.1l1.6-1.6M6.4 12.5 8 10.9l1.6 1.6',
+  trash:    'M2.8 4.2h10.4M6.4 4.2V3a.8.8 0 0 1 .8-.8h1.6a.8.8 0 0 1 .8.8v1.2M4.3 4.2l.6 8.3a.8.8 0 0 0 .8.7h4.6a.8.8 0 0 0 .8-.7l.6-8.3M6.7 6.6v4.1M9.3 6.6v4.1',
+};
+
+const menuIcon = name => MENU_ICONS[name]
+  ? `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+        stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="${MENU_ICONS[name]}"/></svg>`
+  : '<svg width="15" height="15" viewBox="0 0 16 16"></svg>';
+
+let menuKeys = null;
+
+function closeMenu() {
+  $('#ctx').hidden = true;
+  if (menuKeys) { document.removeEventListener('keydown', menuKeys, true); menuKeys = null; }
+}
+
 function showMenu(e, items) {
   // stop the document click handler from closing the menu we just opened
   e.stopPropagation();
+  closeMenu();
   const ctx = $('#ctx');
   ctx.innerHTML = '';
+  const rows = [];
+  const accel = {};
   for (const item of items) {
     if (item === '-') { ctx.append(Object.assign(document.createElement('div'), { className: 'sep' })); continue; }
     const b = document.createElement('button');
+    b.type = 'button';
     if (item.danger) b.className = 'danger';
-    b.innerHTML = `<span>${esc(item.label)}</span>` +
+    b.innerHTML = `<span class="ico">${menuIcon(item.icon)}</span>` +
+                  `<span class="lbl">${esc(item.label)}</span>` +
                   (item.key ? `<span class="key">${esc(item.key)}</span>` : '');
-    b.onclick = () => { ctx.hidden = true; item.run(); };
+    b.onclick = () => { closeMenu(); item.run(); };
+    // hovering takes the highlight with it, so the mouse and keyboard agree
+    b.onmousemove = () => { if (document.activeElement !== b) b.focus(); };
     ctx.append(b);
+    rows.push(b);
+    // a single letter or an F-key in the hint doubles as a shortcut while the menu is open
+    if (item.key && /^(?:[A-Za-z]|F\d{1,2})$/.test(item.key)) accel[item.key.toLowerCase()] = b;
   }
+
+  const step = delta => {
+    const at = rows.indexOf(document.activeElement);
+    const next = at < 0
+      ? (delta > 0 ? 0 : rows.length - 1)
+      : (at + delta + rows.length) % rows.length;
+    rows[next]?.focus();
+  };
+
+  menuKeys = ev => {
+    const stop = () => { ev.preventDefault(); ev.stopPropagation(); };
+    if (ev.key === 'Escape') { stop(); closeMenu(); return; }
+    if (ev.key === 'ArrowDown' || (ev.key === 'Tab' && !ev.shiftKey)) { stop(); return step(1); }
+    if (ev.key === 'ArrowUp' || (ev.key === 'Tab' && ev.shiftKey)) { stop(); return step(-1); }
+    if (ev.key === 'Home') { stop(); return rows[0]?.focus(); }
+    if (ev.key === 'End') { stop(); return rows[rows.length - 1]?.focus(); }
+    if (ev.key === 'Enter' || ev.key === ' ') {
+      if (!rows.includes(document.activeElement)) return;
+      stop();
+      return document.activeElement.click();
+    }
+    if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    const hit = accel[ev.key.toLowerCase()];
+    if (hit) { stop(); hit.click(); }
+  };
+  document.addEventListener('keydown', menuKeys, true);
+
   ctx.hidden = false;
   const w = ctx.offsetWidth, h = ctx.offsetHeight;
   ctx.style.left = Math.min(e.clientX, innerWidth - w - 8) + 'px';
   ctx.style.top = Math.min(e.clientY, innerHeight - h - 8) + 'px';
 }
-document.addEventListener('click', () => { $('#ctx').hidden = true; });
-document.addEventListener('contextmenu', () => { $('#ctx').hidden = true; });
+document.addEventListener('click', closeMenu);
+document.addEventListener('contextmenu', closeMenu);
 $('#tree').oncontextmenu = e => {
   if (e.target.closest('.node')) return;
   e.preventDefault();
   const failed = state.sources.filter(s => s.status === 'failed').map(s => s.id);
   showMenu(e, [
-    { label: 'Upload files', run: () => $('#file').click() },
-    { label: 'New folder', run: () => createFolder(null) },
-    ...(failed.length ? ['-', { label: `Re-run ${failed.length} failed`, run: () => reanalyzeMany(failed) }] : []),
+    { label: 'Upload files', icon: 'upload', key: 'U', run: () => $('#file').click() },
+    { label: 'New folder', icon: 'folderAdd', key: 'N', run: () => createFolder(null) },
+    ...(failed.length ? ['-', { label: `Re-run ${failed.length} failed`, icon: 'rerun', key: 'E',
+        run: () => reanalyzeMany(failed) }] : []),
   ]);
 };
 
 function sourceMenu(e, source) {
   const folders = state.folders;
   showMenu(e, [
-    { label: 'Open', key: 'dbl click', run: () => openViewer(source) },
-    { label: 'Attach to conversation', key: 'drag',
+    { label: 'Open', icon: 'open', key: 'O', run: () => openViewer(source) },
+    { label: 'Attach to conversation', icon: 'attach', key: 'A',
       run: () => attachSources(selectionCount(source) > 1 ? [...state.selected] : [source.id]) },
     '-',
-    { label: 'Rename', key: 'F2', run: () => renameSource(source) },
-    ...(folders.length ? [{ label: 'Move to folder', run: () => moveSource(source) }] : []),
-    ...(source.folder_id ? [{ label: 'Move to root', run: async () => {
+    { label: 'Rename', icon: 'rename', key: 'F2', run: () => renameSource(source) },
+    ...(folders.length ? [{ label: 'Move to folder', icon: 'folder', key: 'M',
+        run: () => moveSource(source) }] : []),
+    ...(source.folder_id ? [{ label: 'Move to root', icon: 'root', run: async () => {
         await api('/api/sources/' + source.id, { method: 'PATCH', json: { folder_id: null } });
         loadTree();
       } }] : []),
-    ...(state.vaults.length > 1 ? [{ label: 'Move to vault',
+    ...(state.vaults.length > 1 ? [{ label: 'Move to vault', icon: 'vault', key: 'V',
         run: () => moveSourcesToVault(selectionCount(source) > 1 ? [...state.selected] : [source.id]) }] : []),
     { label: selectionCount(source) > 1 ? `Re-run analyzer on ${selectionCount(source)}` : 'Re-run analyzer',
+      icon: 'rerun', key: 'E',
       run: () => selectionCount(source) > 1 ? reanalyzeMany([...state.selected]) : reanalyze(source, null) },
     '-',
     { label: selectionCount(source) > 1 ? `Delete ${selectionCount(source)} sources` : 'Delete',
-      danger: true,
+      icon: 'trash', key: 'D', danger: true,
       run: () => deleteSources(selectionCount(source) > 1 ? [...state.selected] : [source.id]) },
   ]);
 }
 
 function folderMenu(e, folder) {
   showMenu(e, [
-    { label: 'Upload into folder', run: () => { state.uploadInto = folder.id; $('#file').click(); } },
-    { label: 'New subfolder', run: () => createFolder(folder.id) },
+    { label: 'Upload into folder', icon: 'upload', key: 'U',
+      run: () => { state.uploadInto = folder.id; $('#file').click(); } },
+    { label: 'New subfolder', icon: 'folderAdd', key: 'N', run: () => createFolder(folder.id) },
     '-',
-    { label: 'Rename', run: async () => {
+    { label: 'Rename', icon: 'rename', key: 'R', run: async () => {
         const name = await askText('Rename folder', folder.name);
         if (!name || name === folder.name) return;
         await api('/api/folders/' + folder.id, { method: 'PATCH', json: { name } });
         loadTree();
       } },
-    ...(state.vaults.length > 1 ? [{ label: 'Move to vault', run: () => moveFolderToVault(folder) }] : []),
-    { label: 'Delete folder', danger: true, run: async () => {
+    ...(state.vaults.length > 1 ? [{ label: 'Move to vault', icon: 'vault', key: 'V',
+        run: () => moveFolderToVault(folder) }] : []),
+    '-',
+    { label: 'Delete folder', icon: 'trash', key: 'D', danger: true, run: async () => {
         if (!await ask('Delete folder', `"${folder.name}" goes away. The files inside it move to the root.`)) return;
         await api('/api/folders/' + folder.id, { method: 'DELETE' });
         loadTree();
@@ -2855,6 +2991,7 @@ async function runTurn(text, files = []) {
 
   const fail = e => {
     stopTimer(turn);
+    clearNaming();
     turn.remove();
     note(e.message, true, el => {
       if (composer.busy) return note('Wait for the current answer to finish first.');
@@ -2886,6 +3023,7 @@ async function runTurn(text, files = []) {
     const decoder = new TextDecoder();
     let buf = '';
     let finished = false;
+    let naming = '';
     for (;;) {
       const { done, value } = await reader.read();
       if (value) buf += decoder.decode(value, { stream: true });
@@ -2907,7 +3045,10 @@ async function runTurn(text, files = []) {
         } catch {
           continue;
         }
-        if (event === 'token') {
+        if (event === 'title') {
+          naming += msg.t || '';
+          showNaming(naming);
+        } else if (event === 'token') {
           pending += msg.t || '';
           thinking?.remove();
           closeThought();
@@ -2962,6 +3103,7 @@ async function runTurn(text, files = []) {
     if (e.name === 'AbortError') {
       const th = turn.querySelector('.thinking');
       if (th) th.textContent = 'Stopped';
+      clearNaming();
       closeThought();
       turn.classList.remove('live');
     } else {
@@ -3003,6 +3145,19 @@ function conversationFromUrl() {
   return m ? m[1] : null;
 }
 
+const APP_NAME = 'Notebook';
+
+function setDocTitle(name) {
+  const title = (name || '').trim();
+  document.title = (title || 'New chat') + ' - ' + APP_NAME;
+}
+
+/// the tab follows whichever conversation is open, and says so when none is
+function syncDocTitle() {
+  if (!state.conversationId) return setDocTitle(null);
+  setDocTitle(state.chats?.find(c => c.id === state.conversationId)?.title);
+}
+
 function setUrl(id, { replace = false } = {}) {
   const path = BASE + (id ? '/c/' + id : '/');
   if (location.pathname === path) return;
@@ -3019,6 +3174,7 @@ window.addEventListener('popstate', () => {
 async function loadChats() {
   const { conversations } = await api('/api/conversations');
   state.chats = conversations;
+  syncDocTitle();
   const list = $('#chatList');
   list.innerHTML = '';
 
@@ -3053,6 +3209,28 @@ async function loadChats() {
   }
 }
 
+/* A new thread has no row in the list until the turn is saved, so the streaming
+   title gets a placeholder one that types itself out and is replaced by loadChats. */
+function showNaming(text) {
+  const list = $('#chatList');
+  let row = $('#namingRow');
+  if (!row) {
+    list.querySelector('.chat-empty')?.remove();
+    row = document.createElement('div');
+    row.id = 'namingRow';
+    row.className = 'chat-row on naming';
+    row.innerHTML = '<span class="ct"></span><span class="when"></span>';
+    list.prepend(row);
+  }
+  row.querySelector('.ct').textContent = text;
+  setDocTitle(text);
+}
+
+function clearNaming() {
+  $('#namingRow')?.remove();
+  syncDocTitle();
+}
+
 function ago(iso) {
   const seconds = (Date.now() - new Date(iso)) / 1000;
   if (seconds < 90) return 'now';
@@ -3063,19 +3241,19 @@ function ago(iso) {
 
 function chatMenu(e, chat) {
   showMenu(e, [
-    { label: 'Open', run: () => openConversation(chat.id) },
-    { label: 'Rename', run: async () => {
+    { label: 'Open', icon: 'chat', key: 'O', run: () => openConversation(chat.id) },
+    { label: 'Rename', icon: 'rename', key: 'R', run: async () => {
         const title = await askText('Rename conversation', chat.title);
         if (!title || title === chat.title) return;
         await api('/api/conversations/' + chat.id, { method: 'PATCH', json: { title } });
         loadChats();
       } },
-    { label: 'Compact context', run: () => {
+    { label: 'Compact context', icon: 'compact', key: 'C', run: () => {
         if (chat.id !== state.conversationId) openConversation(chat.id).then(compactConversation);
         else compactConversation();
       } },
     '-',
-    { label: 'Delete', danger: true, run: () => deleteConversation(chat) },
+    { label: 'Delete', icon: 'trash', key: 'D', danger: true, run: () => deleteConversation(chat) },
   ]);
 }
 
@@ -3094,6 +3272,7 @@ function newConversation({ fromHistory = false } = {}) {
   state.conversationId = null;
   state.attached = [];
   renderAttachments();
+  setDocTitle(null);
   state.context = { used: 0, window: state.activeModel?.context_window || 0 };
   localStorage.removeItem(lastChatKey());
   if (!fromHistory) setUrl(null);
@@ -3103,6 +3282,14 @@ function newConversation({ fromHistory = false } = {}) {
   loadChats();
 }
 $('#newChatBtn').onclick = newConversation;
+
+// a real link, so it can be opened in a tab or copied, but routed in place on a plain click
+$('#brand').href = BASE + '/';
+$('#brand').onclick = e => {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.button) return;
+  e.preventDefault();
+  newConversation();
+};
 
 async function openConversation(id, { fromHistory = false } = {}) {
   let data;
@@ -3121,6 +3308,7 @@ async function openConversation(id, { fromHistory = false } = {}) {
   state.conversationId = id;
   state.attached = [];
   renderAttachments();
+  setDocTitle(data.conversation.title);
   localStorage.setItem(lastChatKey(), id);
   if (!fromHistory) setUrl(id);
   $('#thread').innerHTML = '';
@@ -3614,6 +3802,10 @@ async function renderGeneral(body) {
       <select id="setAnalyzer"></select>
     </div>
     <div class="setting">
+      <div><b>Namer</b><div class="hint">Titles each new chat from its opening message. Off names it after the message itself.</div></div>
+      <select id="setNamer"></select>
+    </div>
+    <div class="setting">
       <div><b>Thinking effort</b><div class="hint">How long the researcher may reason before it answers.</div></div>
       <select id="setEffort"></select>
     </div>
@@ -3623,6 +3815,7 @@ async function renderGeneral(body) {
     </div>`;
   fillModelSelect(body.querySelector('#setResearcher'), order, settings.researcher);
   fillModelSelect(body.querySelector('#setAnalyzer'), seeing.length ? seeing : order, settings.analyzer);
+  fillModelSelect(body.querySelector('#setNamer'), order, settings.namer, { off: 'Off, use the message' });
 
   const effort = body.querySelector('#setEffort');
   for (const [key, label, hint] of EFFORTS) effort.append(new Option(`${label}, ${hint}`, key));
@@ -3630,6 +3823,7 @@ async function renderGeneral(body) {
 
   body.querySelector('#setResearcher').onchange = e => saveSetting({ researcher_model: e.target.value });
   body.querySelector('#setAnalyzer').onchange = e => saveSetting({ analyzer_model: e.target.value });
+  body.querySelector('#setNamer').onchange = e => saveSetting({ namer_model: e.target.value });
   body.querySelector('#setEffort').onchange = e => saveSetting({ thinking_effort: e.target.value });
   body.querySelector('#openConfigureBtn').onclick = () => { $('#settings').hidden = true; openConfigure(); };
 }
@@ -3737,14 +3931,15 @@ async function renderAccount(body) {
 }
 
 /* the role's current model is always offered, even hidden or non vision */
-function fillModelSelect(select, models, current) {
+function fillModelSelect(select, models, current, { off = null } = {}) {
   select.innerHTML = '';
   const label = m => `${m.display_name} (${m.provider_name})`;
   const list = current && !models.some(m => m.id === current.id) ? [current, ...models] : models;
-  select.disabled = !list.length;
-  if (!list.length) return select.append(new Option('No models yet', ''));
+  select.disabled = !list.length && !off;
+  if (off) select.append(new Option(off, 'off'));
+  if (!list.length && !off) return select.append(new Option('No models yet', ''));
   for (const m of list) select.append(new Option(label(m), m.id));
-  select.value = current?.id || list[0].id;
+  select.value = current?.id || (off ? 'off' : list[0].id);
 }
 
 async function saveSetting(patch) {
@@ -4069,7 +4264,7 @@ $('#pfSave').onclick = async () => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (composer.busy) { stopTurn(); return; }
-    $('#ctx').hidden = true;
+    closeMenu();
     for (const p of document.querySelectorAll('.pop')) p.hidden = true;
   }
   if (e.key === 'F2' && state.selectedNode?.startsWith('s:')) {

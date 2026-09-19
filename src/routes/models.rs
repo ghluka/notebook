@@ -185,6 +185,7 @@ pub async fn list_models(
         "hidden_count": hidden_count,
         "researcher_model": models::get_setting(&state.db, &state.user_id, "researcher_model").await?,
         "analyzer_model": models::get_setting(&state.db, &state.user_id, "analyzer_model").await?,
+        "namer_model": models::get_setting(&state.db, &state.user_id, "namer_model").await?,
         "thinking_effort": models::effort(&state.db, &state.user_id).await?.as_str(),
     })))
 }
@@ -238,6 +239,8 @@ pub struct SettingsPatch {
     #[serde(default)]
     pub analyzer_model: Option<String>,
     #[serde(default)]
+    pub namer_model: Option<String>,
+    #[serde(default)]
     pub thinking_effort: Option<String>,
 }
 
@@ -249,11 +252,14 @@ pub async fn patch_settings(
     State(state): State<AppState>,
     Json(body): Json<SettingsPatch>,
 ) -> AppResult<Json<Value>> {
-    for (key, value) in
-        [("researcher_model", &body.researcher_model), ("analyzer_model", &body.analyzer_model)]
-    {
+    for (key, value) in [
+        ("researcher_model", &body.researcher_model),
+        ("analyzer_model", &body.analyzer_model),
+        ("namer_model", &body.namer_model),
+    ] {
         if let Some(model_id) = value {
-            if models::get_model(&state.db, &state.user_id, model_id).await?.is_none() {
+            let off = key == "namer_model" && model_id == models::NAMER_OFF;
+            if !off && models::get_model(&state.db, &state.user_id, model_id).await?.is_none() {
                 return Err(AppError::NotFound(format!("model {model_id}")));
             }
             models::set_setting(&state.db, &state.user_id, key, model_id).await?;
@@ -293,6 +299,7 @@ async fn settings_json(state: &AppState) -> AppResult<Value> {
 
     let researcher = models::resolve_role(&state.db, &state.user_id, "researcher").await?;
     let analyzer = models::resolve_role(&state.db, &state.user_id, "analyzer").await?;
+    let namer = models::resolve_namer(&state.db, &state.user_id).await?;
 
     Ok(json!({
         "pinned": offered,
@@ -309,6 +316,11 @@ async fn settings_json(state: &AppState) -> AppResult<Value> {
             "id": r.model.id,
             "display_name": r.model.display_name,
             "supports_vision": r.model.supports_vision,
+            "provider_name": r.provider.name,
+        })),
+        "namer": namer.map(|r| json!({
+            "id": r.model.id,
+            "display_name": r.model.display_name,
             "provider_name": r.provider.name,
         })),
         "provider_count": providers.len(),

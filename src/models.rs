@@ -492,6 +492,15 @@ pub async fn effort(db: &Db, owner: &str) -> sqlx::Result<Effort> {
         .unwrap_or(Effort::Off))
 }
 
+pub const NAMER_OFF: &str = "off";
+
+pub async fn resolve_namer(db: &Db, owner: &str) -> sqlx::Result<Option<Resolved>> {
+    if get_setting(db, owner, "namer_model").await?.as_deref() == Some(NAMER_OFF) {
+        return Ok(None);
+    }
+    resolve_role(db, owner, "namer").await
+}
+
 pub async fn resolve_role(db: &Db, owner: &str, role: &str) -> sqlx::Result<Option<Resolved>> {
     let assigned = get_setting(db, owner, &format!("{role}_model")).await?;
 

@@ -14,6 +14,18 @@ use crate::models;
 use crate::state::AppState;
 
 const MAX_TOOL_ROUNDS: usize = 6;
+const TITLE_MAX_CHARS: usize = 60;
+const TITLE_MAX_TOKENS: u32 = 24;
+
+// the namer never answers the question, it only labels the thread
+const NAMER_SYSTEM: &str = "\
+You name conversations in a research notebook.\n\n\
+Given the user's opening message, reply with a short title for the thread: \
+the subject in three to six words, in sentence case, no trailing period. \
+Name what the thread is about, do not answer it and do not echo the message \
+back. Never use quotes, markdown, or a prefix like \"Title:\". \
+Reply with the title alone.";
+
 const HITS_PER_SEARCH: i64 = 8;
 const NEIGHBOUR_RADIUS: i64 = 1;
 const READ_MAX_CHARS: usize = 200_000;
@@ -860,6 +872,71 @@ fn tool_found(call: &ToolCall, output: &str) -> String {
     }
 }
 
+/// a model's title can arrive quoted, prefixed or as a whole paragraph: keep the
+/// first line, drop the decoration, and clamp to something a sidebar row can show
+fn tidy_title(raw: &str) -> Option<String> {
+    let mut lines = raw.trim().lines().map(str::trim).filter(|l| !l.is_empty());
+    let mut line = lines.next()?;
+    if line.ends_with(':') {
+        if let Some(next) = lines.next() {
+            line = next;
+        }
+    }
+    let line = line.strip_prefix("Title:").unwrap_or(line).trim();
+    let line = line.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '*' | '#')).trim();
+    let line = line.trim_end_matches(['.', ':']).trim();
+    if line.is_empty() {
+        return None;
+    }
+    let mut out: String = line.chars().take(TITLE_MAX_CHARS).collect();
+    if line.chars().count() > TITLE_MAX_CHARS {
+        if let Some(cut) = out.rfind(' ') {
+            if cut >= TITLE_MAX_CHARS / 2 {
+                out.truncate(cut);
+            }
+        }
+    }
+    Some(out.trim().to_string())
+}
+
+fn title_from_message(message: &str) -> String {
+    message.chars().take(TITLE_MAX_CHARS).collect()
+}
+
+async fn generate_title(state: &AppState, message: &str, tx: Option<&TokenSink>) -> Option<String> {
+    let resolved = models::resolve_namer(&state.db, &state.user_id).await.ok()??;
+    let client = resolved.client(&state.http).ok()?;
+
+    let prompt = message.chars().take(2000).collect::<String>();
+    let request = ChatRequest::new(&resolved.model.model_id, vec![Message::user(&prompt)])
+        .system(NAMER_SYSTEM)
+        .max_tokens(TITLE_MAX_TOKENS);
+
+    let mut title = String::new();
+    match tx {
+        Some(tx) => {
+            let mut stream = crate::llm::chat_stream_with_retry(client.as_ref(), &request)
+                .await
+                .ok()?;
+            while let Some(event) = futures::StreamExt::next(&mut stream).await {
+                match event {
+                    Ok(StreamEvent::Text(t)) => {
+                        title.push_str(&t);
+                        emit_json(tx, "title", json!({ "t": t }));
+                    }
+                    Ok(_) => {}
+                    Err(_) => return None,
+                }
+                if title.chars().count() > TITLE_MAX_CHARS * 2 {
+                    break;
+                }
+            }
+        }
+        None => title = client.chat(&request).await.ok()?.text,
+    }
+    tidy_title(&title)
+}
+
 async fn finish_turn(
     state: &AppState,
     prep: &PreparedTurn,
@@ -867,6 +944,7 @@ async fn finish_turn(
     text: &str,
     usage: TurnUsage,
     trace: TurnTrace,
+    title: Option<String>,
 ) -> AppResult<ChatResponseBody> {
     let (input_tokens, output_tokens) = (usage.input_tokens, usage.output_tokens);
     let mut citations: Vec<Citation> = cited_hits(&plain_marks(text), &prep.seen)
@@ -909,7 +987,7 @@ async fn finish_turn(
     let conversation_id = match &prep.existing {
         Some(c) => c.id.clone(),
         None => {
-            let title: String = message.chars().take(60).collect();
+            let title = title.unwrap_or_else(|| title_from_message(message));
             db::create_conversation(&state.db, &state.user_id, &prep.vault, &title).await?.id
         }
     };
@@ -1045,6 +1123,11 @@ pub async fn chat(
         round += 1;
     };
 
+    let title = match prep.existing {
+        Some(_) => None,
+        None => generate_title(&state, &body.message, None).await,
+    };
+
     Ok(Json(
         finish_turn(
             &state,
@@ -1053,6 +1136,7 @@ pub async fn chat(
             &outcome.text,
             TurnUsage { input_tokens, output_tokens },
             TurnTrace { read_sources, tool_log, thinking, thinking_ms, steps },
+            title,
         )
         .await?,
     ))
@@ -1087,6 +1171,17 @@ async fn run_stream_turn(
     let mut steps: Vec<TraceStep> = Vec::new();
     let mut round = 0;
     let mut answered_now = false;
+
+    // a new thread names itself alongside the answer, so the title streams in early
+    let naming = match prep.existing {
+        Some(_) => None,
+        None => {
+            let (state, message, tx) = (state.clone(), body.message.clone(), tx.clone());
+            Some(tokio::spawn(
+                async move { generate_title(&state, &message, Some(&tx)).await },
+            ))
+        }
+    };
 
     loop {
         if tx.is_closed() {
@@ -1131,6 +1226,10 @@ async fn run_stream_turn(
             if tx.is_closed() {
                 return;
             }
+            let title = match naming {
+                Some(handle) => handle.await.ok().flatten(),
+                None => None,
+            };
             match finish_turn(
                 &state,
                 &prep,
@@ -1138,6 +1237,7 @@ async fn run_stream_turn(
                 &outcome.text,
                 TurnUsage { input_tokens, output_tokens },
                 TurnTrace { read_sources, tool_log, thinking, thinking_ms, steps },
+                title,
             )
             .await
             {
@@ -1187,6 +1287,61 @@ async fn run_stream_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_plain_title_survives_untouched() {
+        assert_eq!(tidy_title("Derivatives of trig functions").as_deref(),
+                   Some("Derivatives of trig functions"));
+    }
+
+    #[test]
+    fn a_dressed_up_title_is_undressed() {
+        for raw in [
+            "\"Derivatives of trig functions\"",
+            "Title: Derivatives of trig functions",
+            "**Derivatives of trig functions**",
+            "Derivatives of trig functions.",
+            "  Derivatives of trig functions  ",
+        ] {
+            assert_eq!(tidy_title(raw).as_deref(), Some("Derivatives of trig functions"),
+                       "{raw} should reduce to the bare title");
+        }
+    }
+
+    #[test]
+    fn a_chatty_namer_gives_up_the_title_under_its_preamble() {
+        let raw = "Sure, here is a title:\n\nDerivatives of trig functions";
+        assert_eq!(tidy_title(raw).as_deref(), Some("Derivatives of trig functions"));
+    }
+
+    #[test]
+    fn a_title_that_merely_ends_in_a_colon_is_kept() {
+        assert_eq!(tidy_title("Calculus:").as_deref(), Some("Calculus"));
+    }
+
+    #[test]
+    fn a_long_title_is_clamped_on_a_word_boundary() {
+        let raw = "The fundamental theorem of calculus and its consequences for integration";
+        let got = tidy_title(raw).expect("title");
+        assert!(got.chars().count() <= TITLE_MAX_CHARS, "{got} fits a sidebar row");
+        assert!(raw.starts_with(&got), "{got} is a prefix of the original");
+        assert!(!got.ends_with(' '), "{got} has no trailing space");
+        assert!(raw[got.len()..].starts_with(' '), "{got} was cut between words");
+    }
+
+    #[test]
+    fn nothing_usable_names_nothing() {
+        for raw in ["", "   ", "\n\n", "\"\"", "."] {
+            assert_eq!(tidy_title(raw), None, "{raw:?} yields no title");
+        }
+    }
+
+    #[test]
+    fn without_a_namer_the_message_still_names_the_thread() {
+        let long = "a".repeat(200);
+        assert_eq!(title_from_message(&long).chars().count(), TITLE_MAX_CHARS);
+        assert_eq!(title_from_message("short one"), "short one");
+    }
 
     fn hit_with(title: &str, locator: &str, source: &str, content: &str) -> SearchHit {
         let mut h = hit(title, locator, source);
